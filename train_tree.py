@@ -30,5 +30,4 @@ def train_and_extract():
         "threshold":      tree.threshold.tolist(),
         "value":          tree.value.tolist(),
     }
-
     return clf, structure, X_test, y_test

@@ -4,7 +4,6 @@ from sklearn.metrics import confusion_matrix
 import numpy as np
 import time
 
-
 def print_confusion_matrix(y_true, y_pred, title="Confusion Matrix"):
     cm = confusion_matrix(y_true, y_pred)
     class_names = ["setosa", "versicolor", "virginica"]
@@ -18,7 +17,6 @@ def print_confusion_matrix(y_true, y_pred, title="Confusion Matrix"):
         for val in row:
             print(f"{val:>12}", end="")
         print()
-
 
 def main():
     clf, structure, X_test, y_test = train_and_extract()
