@@ -1,7 +1,6 @@
 import tenseal as ts
 import numpy as np
 
-
 def create_ckks_context():
     context = ts.context(
         ts.SCHEME_TYPE.CKKS,
