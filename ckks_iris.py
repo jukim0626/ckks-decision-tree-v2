@@ -5,7 +5,7 @@ def create_ckks_context():
     context = ts.context(
         ts.SCHEME_TYPE.CKKS,
         poly_modulus_degree=32768,
-        coeff_mod_bit_sizes=[60, 40, 40, 40, 40, 40, 40, 60]  # depth 6 배치
+        coeff_mod_bit_sizes=[60, 40, 40, 40, 40, 40, 40, 40, 60]  # depth 7 배치
     )
     context.global_scale = 2 ** 40
     return context
@@ -13,10 +13,11 @@ def create_ckks_context():
 # decision tree(if/else) 역할
 def sigmoid_approx_enc(enc_x):
 
-    # 3차 다항식 sigmoid 근사 0.5 + 0.197x - 0.004x^3
+    # 5차 다항식 sigmoid 근사 0.5 + 0.209637x - 0.005402x^3 + 0.000050x^5
     x2 = enc_x * enc_x        # depth 1
     x3 = x2 * enc_x           # depth 2
-    return enc_x * 0.197 + x3 * (-0.004) + 0.5
+    x5 = x2 * x3              # depth 3
+    return 0.5 + enc_x * 0.209637 + x3 * (-0.005402) + x5 * 0.000050
 
 
 def predict_ckks(context, sample, structure):
