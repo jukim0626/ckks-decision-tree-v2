@@ -2,6 +2,7 @@ from sklearn.datasets import load_iris, load_wine, load_breast_cancer
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
+from sigmoid_approx_coeffs import SIGMOID_COEFFS
 import numpy as np
 
 
@@ -41,8 +42,8 @@ def _create_scaler(scaler_name: str) -> MinMaxScaler | StandardScaler | None:
 
 
 def _sigmoid_approx_plain(x: np.ndarray) -> np.ndarray:
-    """ckks_tree.py의 5차 sigmoid 근사를 plaintext numpy로 계산."""
-    return 0.5 + 0.209637 * x - 0.005402 * x**3 + 0.000050 * x**5
+    """ckks_tree.py의 sigmoid polynomial 근사를 plaintext numpy로 계산."""
+    return np.polynomial.polynomial.polyval(x, SIGMOID_COEFFS)
 
 
 def _soft_predict_scores(X: np.ndarray, structure: dict) -> np.ndarray:
@@ -275,56 +276,20 @@ def train_and_extract(
     }
 
     if threshold_tuning == "soft_surrogate":
-        history = _tune_thresholds_for_soft_surrogate(
+        _tune_thresholds_for_soft_surrogate(
             structure=structure,
             X_train=X_train,
             y_train=y_train,
         )
-        print("\n=== THRESHOLD TUNING ===")
-        print("method: soft_surrogate")
-        summary = structure["threshold_tuning_summary"]
-        print(
-            "train soft acc: "
-            f"{summary['before_soft_acc'] * 100:.1f}% -> "
-            f"{summary['after_soft_acc'] * 100:.1f}%"
-        )
-        print(
-            "train hard acc: "
-            f"{summary['before_hard_acc'] * 100:.1f}% -> "
-            f"{summary['after_hard_acc'] * 100:.1f}%"
-        )
-        for item in history:
-            print(
-                f"node {item['node_id']} | feature={item['feature']} | "
-                f"threshold {item['old_threshold']:.6f} -> "
-                f"{item['new_threshold']:.6f} | "
-                f"soft_acc={item['soft_acc'] * 100:.1f}% | "
-                f"hard_acc={item['hard_acc'] * 100:.1f}%"
-            )
 
     # 정확도 확인
-    tuned_hard_pred = _hard_predict_from_structure(X_test, structure)
-    tuned_hard_acc = float(np.mean(tuned_hard_pred == y_test))
     structure["threshold_tuning"] = threshold_tuning
     structure["plain_test_accuracy"] = plain_acc
-    structure["tuned_hard_test_accuracy"] = tuned_hard_acc
     print(
         f"[원본 Plain Decision Tree 정확도 - {dataset_name}, "
         f"scaler={scaler_name}, threshold_tuning={threshold_tuning}]: "
         f"{plain_acc * 100:.1f}%"
     )
-    if threshold_tuning != "none":
-        print(f"[튜닝 threshold hard tree 정확도]: {tuned_hard_acc * 100:.1f}%")
     print(f"[테스트 샘플 수]: {len(X_test)}개")
-
-    # 구조 확인용 출력
-    print("\n=== TREE 구조 ===")
-    print("n_nodes:", tree.node_count)
-    print("children_left :", tree.children_left.tolist())
-    print("children_right:", tree.children_right.tolist())
-    print("feature       :", tree.feature.tolist())
-    print("threshold     :", [round(t, 2) for t in structure["threshold"]])
-    for i in range(tree.node_count):
-        print(f"node {i}: value =", tree.value[i].tolist())
 
     return clf, structure, X_test, y_test, class_names
