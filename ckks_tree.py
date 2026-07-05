@@ -29,21 +29,23 @@ def sigmoid_approx_enc(engine: Engine, rlk, enc_x):
 
 
 def encrypted_argmax(engine: Engine, rlk, sk, pk, class_scores: list) -> int:
-    """암호화된 상태에서 3개 클래스 점수의 argmax를 계산.
+    """암호화된 상태에서 n개 클래스 점수의 argmax를 계산.
 
     max(a, b) = 1/2(a+b) + 1/2*sign(a-b) 공식에 기반한 pairwise 비교를 사용.
     step(x) = (1 + sign(x)) / 2 ≈ sigmoid(COMPARE_SCALE * x) 로 근사.
 
     각 클래스 indicator:
-      ind_i = step(si - sj) * step(si - sk)   (j, k ≠ i)
-    즉, class i가 나머지 두 클래스를 모두 이길 때만 ~1에 수렴.
+      ind_i = prod_{j != i} step(s_i - s_j)
+    즉, class i가 나머지 모두를 이길 때만 ~1에 수렴.
+
+    최적화: step(s_j, s_i) = 1 - step(s_i, s_j) 이므로 (i < j)만 계산해서 캐시.
     """
+    n_classes = len(class_scores)
     # None 클래스는 0으로 채움
     s = [
         cs if cs is not None else engine.encrypt([0.0], pk)
         for cs in class_scores
     ]
-    s0, s1, s2 = s[0], s[1], s[2]
 
     def step(enc_a, enc_b):
         """step(a - b) = sigmoid(COMPARE_SCALE * (a - b)): a>b면 ~1, a<b면 ~0."""
@@ -51,28 +53,33 @@ def encrypted_argmax(engine: Engine, rlk, sk, pk, class_scores: list) -> int:
         scaled = engine.multiply(diff, COMPARE_SCALE)          # level -1
         return sigmoid_approx_enc(engine, rlk, scaled)         # level -4
 
-    # pairwise step 비교 (3쌍)
-    step_01 = step(s0, s1)                          # s0 > s1 면 ~1
-    step_02 = step(s0, s2)                          # s0 > s2 면 ~1
-    step_12 = step(s1, s2)                          # s1 > s2 면 ~1
+    # step(s[i], s[j])를 i < j 조합에 대해서만 계산 (sigmoid 호출 절반으로 축소)
+    step_cache = {}
+    for i in range(n_classes):
+        for j in range(i + 1, n_classes):
+            step_cache[(i, j)] = step(s[i], s[j])
 
-    # 반대 방향: 1 - step = step(b - a)
-    step_10 = engine.subtract(1.0, step_01)         # s1 > s0 면 ~1
-    step_20 = engine.subtract(1.0, step_02)         # s2 > s0 면 ~1
-    step_21 = engine.subtract(1.0, step_12)         # s2 > s1 면 ~1
-
-    # 각 클래스 indicator: 두 step 결과를 곱함 (CT × CT, level -1)
-    ind_0 = engine.multiply(step_01, step_02, rlk)  # s0이 s1, s2 모두 이길 때 ~1
-    ind_1 = engine.multiply(step_10, step_12, rlk)  # s1이 s0, s2 모두 이길 때 ~1
-    ind_2 = engine.multiply(step_20, step_21, rlk)  # s2가 s0, s1 모두 이길 때 ~1
+    # 각 클래스 i의 indicator = j != i 에 대한 step(s[i], s[j]) 들의 곱
+    indicators = []
+    for i in range(n_classes):
+        ind = None
+        for j in range(n_classes):
+            if i == j:
+                continue
+            if i < j:
+                factor = step_cache[(i, j)]
+            else:
+                # step(s[i], s[j]) = 1 - step(s[j], s[i])
+                factor = engine.subtract(1.0, step_cache[(j, i)])
+            if ind is None:
+                ind = factor
+            else:
+                ind = engine.multiply(ind, factor, rlk)        # CT×CT, level -1
+        indicators.append(ind)
 
     # indicator 복호화 후 argmax
-    indicators = [
-        engine.decrypt(ind_0, sk)[0],
-        engine.decrypt(ind_1, sk)[0],
-        engine.decrypt(ind_2, sk)[0],
-    ]
-    return int(np.argmax(indicators))
+    decrypted = [engine.decrypt(ind, sk)[0] for ind in indicators]
+    return int(np.argmax(decrypted))
 
 
 def predict_ckks(ctx: dict, sample, structure) -> int:
@@ -101,7 +108,10 @@ def predict_ckks(ctx: dict, sample, structure) -> int:
     node_weights = [None] * n_nodes
     node_weights[0] = engine.encrypt([1.0], pk)
 
-    class_scores = [None] * 3
+    # 클래스 개수는 root value의 길이에서 자동 추론
+    # value[node_id] shape: [[c0, c1, ..., c_{n-1}]]
+    n_classes = len(value[0][0])
+    class_scores = [None] * n_classes
 
     for node_id in range(n_nodes):
         if node_weights[node_id] is None:

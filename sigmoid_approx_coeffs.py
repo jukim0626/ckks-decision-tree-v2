@@ -24,7 +24,6 @@ def chebyshev_approximation(func, degree, interval):
     cheb_nodes_std = np.cos((2 * k + 1) * np.pi / (2 * n))
     # [a, b] 구간으로 변환
     cheb_nodes = 0.5 * (a + b) + 0.5 * (b - a) * cheb_nodes_std
-
     # 각 노드에서 함수값 계산
     func_values = func(cheb_nodes)
 
