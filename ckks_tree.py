@@ -1,4 +1,5 @@
 from desilofhe import Engine
+from sigmoid_approx_coeffs import SIGMOID_APPROX_DEGREE, SIGMOID_COEFFS
 import numpy as np
 
 # 비교 sigmoid를 sharp하게 만들기 위한 스케일
@@ -6,26 +7,37 @@ import numpy as np
 COMPARE_SCALE = 5.0
 
 
-def create_ckks_context() -> dict:
+def create_ckks_context(
+    mode: str = "gpu",
+    device_id: int = 0,
+    max_level: int = 15,
+) -> dict:
     """desilofhe Engine과 키 묶음을 생성해서 반환.
 
-    max_level=15: tree traversal(~7 level) + argmax 비교(~5 level) 여유분 포함.
+    max_level=15: 5차 sigmoid polynomial 기준 tree traversal과 argmax 여유분 포함.
+    mode="gpu": DESILO FHE의 CUDA backend를 사용.
     """
-    engine = Engine(max_level=15)
+    engine = Engine(max_level=max_level, mode=mode, device_id=device_id)
     sk = engine.create_secret_key()
     pk = engine.create_public_key(sk)
     rlk = engine.create_relinearization_key(sk)
-    return {"engine": engine, "sk": sk, "pk": pk, "rlk": rlk}
+    return {
+        "engine": engine,
+        "sk": sk,
+        "pk": pk,
+        "rlk": rlk,
+        "mode": mode,
+        "device_id": device_id,
+        "sigmoid_degree": SIGMOID_APPROX_DEGREE,
+    }
 
 
 def sigmoid_approx_enc(engine: Engine, rlk, enc_x):
-    """5차 다항식으로 sigmoid를 근사 (0~1 범위 출력).
+    """5차 다항식으로 sigmoid를 근사.
 
-    sigmoid(x) ≈ 0.5 + 0.209637x - 0.005402x^3 + 0.000050x^5
     evaluate_polynomial은 coeffs[i]를 i차 계수로 받는다.
     """
-    coeffs = [0.5, 0.209637, 0.0, -0.005402, 0.0, 0.000050]
-    return engine.evaluate_polynomial(enc_x, coeffs, rlk)
+    return engine.evaluate_polynomial(enc_x, SIGMOID_COEFFS, rlk)
 
 
 def encrypted_argmax(engine: Engine, rlk, sk, pk, class_scores: list) -> int:
@@ -51,7 +63,7 @@ def encrypted_argmax(engine: Engine, rlk, sk, pk, class_scores: list) -> int:
         """step(a - b) = sigmoid(COMPARE_SCALE * (a - b)): a>b면 ~1, a<b면 ~0."""
         diff = engine.subtract(enc_a, enc_b)                   # level 소모 없음
         scaled = engine.multiply(diff, COMPARE_SCALE)          # level -1
-        return sigmoid_approx_enc(engine, rlk, scaled)         # level -4
+        return sigmoid_approx_enc(engine, rlk, scaled)
 
     # step(s[i], s[j])를 i < j 조합에 대해서만 계산 (sigmoid 호출 절반으로 축소)
     step_cache = {}

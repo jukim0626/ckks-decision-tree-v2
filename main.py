@@ -5,6 +5,15 @@ import numpy as np
 import time
 
 
+def sync_engine_if_needed(ctx: dict) -> None:
+    """DESILO FHE async GPU mode에서만 engine 작업 완료를 기다림."""
+    try:
+        ctx["engine"].sync()
+    except RuntimeError as exc:
+        if "Async GPU mode" not in str(exc):
+            raise
+
+
 def print_confusion_matrix(
     y_true: np.ndarray,
     y_pred: np.ndarray | list[int],
@@ -94,7 +103,6 @@ def run_dataset(
     n_features = X_test.shape[1]
     n_nodes = len(structure["children_left"])
     n_classes = len(class_names)
-    tuned_hard_acc = structure.get("tuned_hard_test_accuracy")
 
     print("\n[실험 정보]")
     print(f"Dataset 이름: {dataset_name}")
@@ -105,8 +113,6 @@ def run_dataset(
     print(f"테스트 샘플 수: {n_samples}")
     print(f"feature 수: {n_features}")
     print(f"tree node 수: {n_nodes}")
-    if tuned_hard_acc is not None and threshold_tuning != "none":
-        print(f"튜닝 threshold hard tree accuracy: {tuned_hard_acc * 100:.2f}%")
 
     # 일반 Decision Tree
     y_pred_plain = clf.predict(X_test)
@@ -124,6 +130,7 @@ def run_dataset(
         sample_start = time.time()
         print(f"[CKKS] sample {i + 1}/{n_samples} 시작", flush=True)
         pred = predict_ckks(ctx, sample, structure)
+        sync_engine_if_needed(ctx)
         y_pred_ckks.append(pred)
         sample_elapsed = time.time() - sample_start
         print(
@@ -149,8 +156,6 @@ def run_dataset(
     print(f"feature 수: {n_features}")
     print(f"tree node 수: {n_nodes}")
     print(f"Plain DT accuracy: {plain_acc:.2f}%")
-    if tuned_hard_acc is not None and threshold_tuning != "none":
-        print(f"Tuned hard DT accuracy: {tuned_hard_acc * 100:.2f}%")
     print(f"CKKS DT accuracy: {ckks_acc:.2f}%")
     print(f"Plain/CKKS match count: {match_count}/{n_samples}")
     print(f"CKKS total time: {total_elapsed:.2f}s")
@@ -160,10 +165,17 @@ def run_dataset(
 
 def main():
     # CKKS context는 데이터셋과 무관하므로 한 번만 생성해서 재사용
-    ctx = create_ckks_context()
+    ctx = create_ckks_context(mode="gpu", device_id=0)
+    print(
+        f"[CKKS Engine] mode={ctx['mode']} | device_id={ctx['device_id']} | "
+        f"max_level={ctx['engine'].max_level} | slot_count={ctx['engine'].slot_count} | "
+        f"sigmoid_degree={ctx['sigmoid_degree']}"
+    )
 
     experiments = [
+        ("iris", "minmax_minus1_1", "soft_surrogate"),
         ("wine", "minmax_minus1_1", "soft_surrogate"),
+        ("breast_cancer", "minmax_minus1_1", "soft_surrogate"),
     ]
 
     # experiments = [

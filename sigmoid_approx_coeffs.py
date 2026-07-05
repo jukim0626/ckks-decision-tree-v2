@@ -1,78 +1,88 @@
+"""Sigmoid polynomial approximation coefficients.
+
+DESILO FHE의 ``evaluate_polynomial``은 ``coeffs[i]``를 x^i 계수로 사용한다.
+따라서 아래 리스트는 일반 polynomial basis 기준이다.
+"""
+
 import numpy as np
 
 
-def true_sigmoid(x):
-    return 1 / (1 + np.exp(-x))
+SIGMOID_APPROX_DEGREE = 5
+SIGMOID_APPROX_INTERVAL = 8.0
+
+# 5차 Chebyshev interpolation 근사 계수, interval=[-8, 8].
+# sigmoid(x) ~= sum(SIGMOID_COEFFS[i] * x**i)
+SIGMOID_COEFFS = [
+    0.5,
+    0.209637,
+    0.0,
+    -0.005402,
+    0.0,
+    0.000050,
+]
 
 
-def chebyshev_approximation(func, degree, interval):
-    """
-    Chebyshev 근사로 다항식 계수 구하기
+def true_sigmoid(x: np.ndarray) -> np.ndarray:
+    """실제 sigmoid 값을 계산."""
+    return 1.0 / (1.0 + np.exp(-x))
 
-    func     : 근사할 함수 (sigmoid)
-    degree   : 다항식 차수 (5)
-    interval : 근사 구간 [-a, a]
-    """
+
+def chebyshev_approximation(
+    degree: int,
+    interval: float,
+) -> np.ndarray:
+    """Chebyshev interpolation으로 sigmoid polynomial 계수를 계산."""
     a, b = -interval, interval
+    n_nodes = degree + 1
+    k = np.arange(n_nodes)
 
-    # Chebyshev 노드 계산
-    # [-1, 1] 구간의 Chebyshev 노드를 [a, b]로 변환
-    # k번째 노드: cos((2k+1)π / 2(n+1))
-    n = degree + 1  # 노드 개수
-    k = np.arange(n)
-    # [-1, 1] 구간 노드
-    cheb_nodes_std = np.cos((2 * k + 1) * np.pi / (2 * n))
-    # [a, b] 구간으로 변환
+    cheb_nodes_std = np.cos((2 * k + 1) * np.pi / (2 * n_nodes))
     cheb_nodes = 0.5 * (a + b) + 0.5 * (b - a) * cheb_nodes_std
-    # 각 노드에서 함수값 계산
-    func_values = func(cheb_nodes)
+    func_values = true_sigmoid(cheb_nodes)
 
-    # Chebyshev 계수 계산 (이산 코사인 변환 방식)
-    # cj = (2/n) * Σ f(xk) * Tj(xk_std)
-    cheb_coeffs = np.zeros(n)
-    for j in range(n):
-        Tj = np.cos(j * np.arccos(cheb_nodes_std))  # Chebyshev 다항식 값
-        cheb_coeffs[j] = (2 / n) * np.sum(func_values * Tj)
-    cheb_coeffs[0] /= 2  # c0는 절반
+    cheb_coeffs = np.zeros(n_nodes)
+    for j in range(n_nodes):
+        basis_values = np.cos(j * np.arccos(cheb_nodes_std))
+        cheb_coeffs[j] = (2.0 / n_nodes) * np.sum(func_values * basis_values)
+    cheb_coeffs[0] /= 2.0
 
-    # Chebyshev 계수 → 일반 다항식 계수로 변환
-    # np.polynomial.chebyshev.cheb2poly 사용
-    # 단, 구간 변환 때문에 표준화된 변수로 변환 필요
     poly_coeffs_std = np.polynomial.chebyshev.cheb2poly(cheb_coeffs)
-
-    # [a, b] → [-1, 1] 변환을 반영한 계수 보정
-    # x_std = (2x - (a+b)) / (b-a)
-    # x = x_std * (b-a)/2 + (a+b)/2
-    scale = 2 / (b - a)
+    scale = 2.0 / (b - a)
     shift = -(a + b) / (b - a)
-
-    # 변환된 계수를 원래 x에 대한 계수로 변환
-    from numpy.polynomial.polynomial import polyfromroots, polyval
     transformed = np.polynomial.polynomial.Polynomial(poly_coeffs_std)
-    # x_std = scale*x + shift 대입
     final_poly = transformed(np.polynomial.polynomial.Polynomial([shift, scale]))
-    final_coeffs = final_poly.coef
+    coeffs = final_poly.coef
 
-    return final_coeffs, cheb_coeffs
+    coeffs[0] = 0.5
+    coeffs[2::2] = 0.0
+    return coeffs
 
 
-# 5차 Chebyshev 근사, 구간 [-8, 8]
-degree = 5
-interval = 8
-final_coeffs, cheb_coeffs = chebyshev_approximation(true_sigmoid, degree, interval)
+def max_approximation_error(coeffs: list[float] | np.ndarray, interval: float) -> float:
+    """지정 구간에서 sigmoid polynomial의 최대 절대 오차를 계산."""
+    x_test = np.linspace(-interval, interval, 20001)
+    y_true = true_sigmoid(x_test)
+    y_approx = np.polynomial.polynomial.polyval(x_test, coeffs)
+    return float(np.max(np.abs(y_true - y_approx)))
 
-print("=== Chebyshev 근사 결과 ===")
-print(f"상수항 (x⁰): {final_coeffs[0]:.6f}")
-print(f"x¹ 계수:     {final_coeffs[1]:.6f}")
-print(f"x² 계수:     {final_coeffs[2]:.6f}")
-print(f"x³ 계수:     {final_coeffs[3]:.6f}")
-print(f"x⁴ 계수:     {final_coeffs[4]:.6f}")
-print(f"x⁵ 계수:     {final_coeffs[5]:.6f}")
 
-# 최대 오차 계산
-x_test = np.linspace(-interval, interval, 10000)
-y_true = true_sigmoid(x_test)
-y_approx = sum(final_coeffs[i] * x_test ** i for i in range(len(final_coeffs)))
-max_err = np.max(np.abs(y_true - y_approx))
-print(f"\n최대 오차: {max_err:.6f}")
+def main() -> None:
+    """현재 설정의 coefficient와 근사 오차를 출력."""
+    coeffs = chebyshev_approximation(
+        degree=SIGMOID_APPROX_DEGREE,
+        interval=SIGMOID_APPROX_INTERVAL,
+    )
 
+    print("=== Chebyshev sigmoid approximation ===")
+    print(f"degree: {SIGMOID_APPROX_DEGREE}")
+    print(f"interval: [-{SIGMOID_APPROX_INTERVAL:g}, {SIGMOID_APPROX_INTERVAL:g}]")
+    print("coeffs:")
+    for degree, coeff in enumerate(coeffs):
+        print(f"  x^{degree:02d}: {coeff:.18e}")
+
+    max_error = max_approximation_error(coeffs, SIGMOID_APPROX_INTERVAL)
+    print(f"max error: {max_error:.12f}")
+
+
+if __name__ == "__main__":
+    main()
