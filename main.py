@@ -73,26 +73,40 @@ def print_compare_input_range(
         )
 
 
-def run_dataset(dataset_name: str, scaler_name: str, ctx: dict) -> None:
+def run_dataset(
+    dataset_name: str,
+    scaler_name: str,
+    threshold_tuning: str,
+    ctx: dict,
+) -> None:
     """한 데이터셋에 대해 평문 DT vs CKKS DT 정확도 비교."""
-    print(f"\n=========== dataset: {dataset_name} | scaler: {scaler_name} ===========")
+    print(
+        f"\n=========== dataset: {dataset_name} | "
+        f"scaler: {scaler_name} | "
+        f"threshold_tuning: {threshold_tuning} ==========="
+    )
     clf, structure, X_test, y_test, class_names = train_and_extract(
         dataset_name=dataset_name,
         scaler_name=scaler_name,
+        threshold_tuning=threshold_tuning,
     )
     n_samples = len(X_test)
     n_features = X_test.shape[1]
     n_nodes = len(structure["children_left"])
     n_classes = len(class_names)
+    tuned_hard_acc = structure.get("tuned_hard_test_accuracy")
 
     print("\n[실험 정보]")
     print(f"Dataset 이름: {dataset_name}")
     print(f"Scaler 이름: {scaler_name}")
+    print(f"Threshold tuning: {threshold_tuning}")
     print(f"클래스 이름: {class_names}")
     print(f"클래스 수: {n_classes}")
     print(f"테스트 샘플 수: {n_samples}")
     print(f"feature 수: {n_features}")
     print(f"tree node 수: {n_nodes}")
+    if tuned_hard_acc is not None and threshold_tuning != "none":
+        print(f"튜닝 threshold hard tree accuracy: {tuned_hard_acc * 100:.2f}%")
 
     # 일반 Decision Tree
     y_pred_plain = clf.predict(X_test)
@@ -128,12 +142,15 @@ def run_dataset(dataset_name: str, scaler_name: str, ctx: dict) -> None:
     print("\n--- 결과 비교 ---")
     print(f"Dataset 이름: {dataset_name}")
     print(f"Scaler 이름: {scaler_name}")
+    print(f"Threshold tuning: {threshold_tuning}")
     print(f"클래스 이름: {class_names}")
     print(f"클래스 수: {n_classes}")
     print(f"테스트 샘플 수: {n_samples}")
     print(f"feature 수: {n_features}")
     print(f"tree node 수: {n_nodes}")
     print(f"Plain DT accuracy: {plain_acc:.2f}%")
+    if tuned_hard_acc is not None and threshold_tuning != "none":
+        print(f"Tuned hard DT accuracy: {tuned_hard_acc * 100:.2f}%")
     print(f"CKKS DT accuracy: {ckks_acc:.2f}%")
     print(f"Plain/CKKS match count: {match_count}/{n_samples}")
     print(f"CKKS total time: {total_elapsed:.2f}s")
@@ -146,19 +163,21 @@ def main():
     ctx = create_ckks_context()
 
     experiments = [
-        ("wine", "minmax_minus1_1"),
+        ("wine", "minmax_minus1_1", "soft_surrogate"),
     ]
 
     # experiments = [
-    #     ("iris", "none"),
-    #     ("wine", "none"),
-    #     ("wine", "minmax_minus1_1"),
-    #     ("breast_cancer", "none"),
-    #     ("breast_cancer", "minmax_minus1_1"),
+    #     ("iris", "none", "none"),
+    #     ("iris", "minmax_minus1_1", "soft_surrogate"),
+    #     ("wine", "none", "none"),
+    #     ("wine", "minmax_minus1_1", "none"),
+    #     ("wine", "minmax_minus1_1", "soft_surrogate"),
+    #     ("breast_cancer", "none", "none"),
+    #     ("breast_cancer", "minmax_minus1_1", "soft_surrogate"),
     # ]
 
-    for dataset_name, scaler_name in experiments:
-        run_dataset(dataset_name, scaler_name, ctx)
+    for dataset_name, scaler_name, threshold_tuning in experiments:
+        run_dataset(dataset_name, scaler_name, threshold_tuning, ctx)
 
 
 if __name__ == "__main__":
