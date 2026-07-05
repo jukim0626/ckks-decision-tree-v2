@@ -1,6 +1,7 @@
 from sklearn.datasets import load_iris, load_wine, load_breast_cancer
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
 
 
 _LOADERS = {
@@ -9,14 +10,37 @@ _LOADERS = {
     "breast_cancer": load_breast_cancer,
 }
 
+_SCALER_NAMES = {
+    "none",
+    "minmax_0_1",
+    "minmax_minus1_1",
+    "standard",
+}
 
-def train_and_extract(dataset_name: str = "iris"):
+
+def _create_scaler(scaler_name: str) -> MinMaxScaler | StandardScaler | None:
+    """scaler 이름에 맞는 sklearn scaler 객체를 새로 생성."""
+    if scaler_name == "none":
+        return None
+    if scaler_name == "minmax_0_1":
+        return MinMaxScaler(feature_range=(0, 1))
+    if scaler_name == "minmax_minus1_1":
+        return MinMaxScaler(feature_range=(-1, 1))
+    if scaler_name == "standard":
+        return StandardScaler()
+    raise ValueError(
+        f"unknown scaler: {scaler_name!r}. "
+        f"choose from {sorted(_SCALER_NAMES)}"
+    )
+
+
+def train_and_extract(dataset_name: str = "iris", scaler_name: str = "none"):
     """지정한 sklearn 데이터셋으로 Decision Tree를 학습하고 트리 구조를 dict로 반환.
 
     Returns:
         clf         : 학습된 DecisionTreeClassifier
         structure   : {"children_left", "children_right", "feature", "threshold", "value"}
-        X_test      : 테스트 입력
+        X_test      : 테스트 입력 (scaler_name이 none이 아니면 scaling 적용됨)
         y_test      : 테스트 라벨
         class_names : 데이터셋의 클래스 이름 리스트 (str)
     """
@@ -24,6 +48,11 @@ def train_and_extract(dataset_name: str = "iris"):
         raise ValueError(
             f"unknown dataset: {dataset_name!r}. "
             f"choose from {list(_LOADERS.keys())}"
+        )
+    if scaler_name not in _SCALER_NAMES:
+        raise ValueError(
+            f"unknown scaler: {scaler_name!r}. "
+            f"choose from {sorted(_SCALER_NAMES)}"
         )
 
     # 데이터 로드
@@ -36,13 +65,19 @@ def train_and_extract(dataset_name: str = "iris"):
         X, y, test_size=0.2, random_state=42
     )
 
+    # Scaling은 train에만 fit하고 test에는 transform만 적용
+    scaler = _create_scaler(scaler_name)
+    if scaler is not None:
+        X_train = scaler.fit_transform(X_train)
+        X_test = scaler.transform(X_test)
+
     # Decision Tree 학습
     clf = DecisionTreeClassifier(max_depth=3, random_state=42)
     clf.fit(X_train, y_train)
 
     # 정확도 확인
     acc = clf.score(X_test, y_test)
-    print(f"[일반 Decision Tree 정확도 - {dataset_name}]: {acc * 100:.1f}%")
+    print(f"[일반 Decision Tree 정확도 - {dataset_name}, scaler={scaler_name}]: {acc * 100:.1f}%")
     print(f"[테스트 샘플 수]: {len(X_test)}개")
 
     # 트리 구조 추출
