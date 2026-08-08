@@ -4,9 +4,9 @@ from __future__ import annotations
 import numpy as np
 
 from client_assisted.dataset import load_scaled_dataset_subset, one_hot_encode
-from closed_form_mgi import blended_gate_from_gates, encrypted_weighted_threshold, evaluate_closed_form_candidates_from_thresholds
-from fully_encrypted_mgi_stump import create_bootstrap_context, encrypt_dataset
-from soft_mgi import soft_mgi_weights
+from closed_form_mgi.primitives import create_bootstrap_context, encrypt_dataset
+from closed_form_mgi.soft_mgi import soft_mgi_weights
+from closed_form_mgi.train import blended_gate_from_gates, encrypted_weighted_threshold, evaluate_closed_form_candidates_from_thresholds
 
 X_train, X_test, y_train, y_test, class_names = load_scaled_dataset_subset("iris", test_size=30)
 n_classes = len(class_names)

@@ -5,13 +5,14 @@ decision tree. candidate grid, weighted-Gini split 선택, weighted-leaf 추론 
 client_assisted/의 production 알고리즘(candidates.py, client_ops.py,
 verification.py)과 동일하게 맞췄다 - steepness 계수 자체만 다르다.
 
-실행: python steepness_precision_experiment.py
-출력: steepness_precision_results.json, steepness_precision_plot.png
+실행: python experiments/steepness_precision/steepness_precision_experiment.py
+출력: steepness_precision_results.json, steepness_precision_plot.png (스크립트와 같은 폴더)
 """
 
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import numpy as np
 from sklearn.tree import DecisionTreeClassifier
@@ -165,7 +166,8 @@ def main() -> None:
             "hard_accuracy": hard_acc,
         }
 
-    with open("steepness_precision_results.json", "w") as f:
+    output_path = Path(__file__).parent / "steepness_precision_results.json"
+    with open(output_path, "w") as f:
         json.dump(
             {
                 "depth": DEPTH,
@@ -180,7 +182,7 @@ def main() -> None:
             indent=2,
             ensure_ascii=False,
         )
-    print("\nsaved -> steepness_precision_results.json")
+    print(f"\nsaved -> {output_path}")
 
 
 if __name__ == "__main__":

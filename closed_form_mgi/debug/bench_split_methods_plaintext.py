@@ -14,6 +14,7 @@ sqrt는 아직 이 프로젝트에 구현된 적 없는 새 primitive라 별도�
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import numpy as np
 from sklearn.tree import DecisionTreeClassifier
@@ -197,6 +198,7 @@ for dataset_name in DATASETS:
             )
         results.append(row)
 
-with open("split_methods_plaintext_results.json", "w") as f:
+output_path = Path(__file__).parent / "split_methods_plaintext_results.json"
+with open(output_path, "w") as f:
     json.dump(results, f, indent=2)
-print("\nsaved -> split_methods_plaintext_results.json")
+print(f"\nsaved -> {output_path}")

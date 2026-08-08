@@ -24,8 +24,8 @@ from __future__ import annotations
 import numpy as np
 
 from ckks_tree import sigmoid_approx_enc
-from exp_approx_coeffs import exp_neg_beta_coeffs
-from fully_encrypted_mgi_stump import ensure_level
+from closed_form_mgi.exp_approx_coeffs import exp_neg_beta_coeffs
+from closed_form_mgi.primitives import ensure_level
 
 
 def soft_mgi_weights(

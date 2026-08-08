@@ -19,7 +19,7 @@ import time
 
 import numpy as np
 
-from fully_encrypted_mgi_stump import (
+from closed_form_mgi.primitives import (
     BootstrapTrainingContext,
     create_bootstrap_context,
     encrypted_blend,

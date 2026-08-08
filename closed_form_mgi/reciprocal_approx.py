@@ -30,7 +30,7 @@ y_n*(2 - D*y_n))은 초기값만 안전 범위(0 < y0 < 2/D) 안에 있으면 �
 
 from __future__ import annotations
 
-from fully_encrypted_mgi_stump import ensure_level
+from closed_form_mgi.primitives import ensure_level
 
 
 def safe_initial_guess(d_upper_bound: float) -> float:

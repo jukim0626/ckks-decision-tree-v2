@@ -5,13 +5,16 @@
 """
 
 import json
+from pathlib import Path
 
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-with open("steepness_precision_results.json") as f:
+SCRIPT_DIR = Path(__file__).parent
+
+with open(SCRIPT_DIR / "steepness_precision_results.json") as f:
     data = json.load(f)
 
 results = data["results"]
@@ -121,5 +124,5 @@ fig.text(
     color="#898781", fontsize=9, ha="left",
 )
 
-fig.savefig("steepness_precision_plot.png", facecolor=fig.get_facecolor(), bbox_inches="tight")
+fig.savefig(SCRIPT_DIR / "steepness_precision_plot.png", facecolor=fig.get_facecolor(), bbox_inches="tight")
 print("saved plot")

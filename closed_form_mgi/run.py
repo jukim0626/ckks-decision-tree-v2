@@ -1,10 +1,13 @@
-"""closed_form_mgi.py(grid 없는 closed-form threshold + soft-MGI blend)를 실제 CKKS로
-depth별로 돌려서 정확도/시간/연산 횟수를 실측. hard tournament, 기존 static-grid
-soft-MGI(run_soft_mgi_stump.py)와 비교하기 위한 벤치마크.
+"""closed_form_mgi.train/inference(grid 없는 closed-form threshold + soft-MGI blend)를
+실제 CKKS로 depth별로 돌려서 정확도/시간/연산 횟수를 실측. hard tournament, 기존
+static-grid soft-MGI(closed_form_mgi 이전 버전, archive 참고)와 비교하기 위한 벤치마크.
 
 score_normalizer는 고정(n_samples**2)만 씀 - encrypted min/max(soft-min)는 아직 미구현
-(closed_form_mgi.py 상단 docstring 참고). depth>=2는 plaintext에서 확인된 대로 이
+(closed_form_mgi/train.py 상단 docstring 참고). depth>=2는 plaintext에서 확인된 대로 이
 한계 때문에 정확도가 낮게 나올 것으로 예상 - 이것도 이번 실측의 목적 중 하나.
+
+실행: 프로젝트 루트에서 `python -m closed_form_mgi.run [dataset] [depths]`
+(예: `python -m closed_form_mgi.run iris 1,2,3`)
 """
 
 from __future__ import annotations
@@ -15,8 +18,9 @@ import time
 import numpy as np
 
 from client_assisted.dataset import load_scaled_dataset_subset, one_hot_encode
-from closed_form_mgi import train_and_eval_closed_form_mgi_tree
-from fully_encrypted_mgi_stump import create_bootstrap_context, encrypt_dataset
+from closed_form_mgi.inference import route_dataset_through_model, score_and_predict
+from closed_form_mgi.primitives import create_bootstrap_context, encrypt_dataset
+from closed_form_mgi.train import train_closed_form_mgi_tree
 
 DATASET = sys.argv[1] if len(sys.argv) > 1 else "iris"
 DEPTHS = [int(d) for d in sys.argv[2].split(",")] if len(sys.argv) > 2 else [1, 2, 3]
@@ -45,10 +49,6 @@ def decrypt_scalar(ctx, ct) -> float:
     return float(ctx.engine.decrypt(ct, ctx.sk)[0].real)
 
 
-def decrypt_vector(ctx, ct, n: int) -> np.ndarray:
-    return np.array([v.real for v in ctx.engine.decrypt(ct, ctx.sk)[:n]])
-
-
 def main():
     X_train, X_test, y_train, y_test, class_names = load_scaled_dataset_subset(DATASET, test_size=30)
     n_classes = len(class_names)
@@ -69,26 +69,20 @@ def main():
 
         print(f"\n=== depth={depth} ===", flush=True)
         t0 = time.time()
-        leaf_counts, leaf_test_weights = train_and_eval_closed_form_mgi_tree(
-            ctx, train_dataset, test_dataset, depth, beta=BETA, verbose=True
-        )
+        model = train_closed_form_mgi_tree(ctx, train_dataset, depth, beta=BETA, verbose=True)
+        leaf_test_weights = route_dataset_through_model(ctx, model, test_dataset)
+        n_test = X_test.shape[0]
+        preds = score_and_predict(ctx, model, leaf_test_weights, n_test, n_classes)
         elapsed = time.time() - t0
 
-        n_test = X_test.shape[0]
-        leaf_counts_dec = [np.array([decrypt_scalar(ctx, c) for c in lc]) for lc in leaf_counts]
-        leaf_test_weights_dec = [decrypt_vector(ctx, w, n_test) for w in leaf_test_weights]
-
-        scores = np.zeros((n_test, n_classes))
-        for w, counts in zip(leaf_test_weights_dec, leaf_counts_dec):
-            scores += w[:, None] * counts[None, :]
-        preds = np.argmax(scores, axis=1)
         accuracy = float((preds == y_test).mean())
+        leaf_counts_dec = [np.array([decrypt_scalar(ctx, c) for c in lc]) for lc in model.leaf_counts]
 
         print(f"[depth={depth}] time={elapsed:.2f}s accuracy={accuracy:.4f}")
         print(f"[depth={depth}] call counts={dict(counter.counts)}")
         print(f"[depth={depth}] leaf class distribution:")
         for i, c in enumerate(leaf_counts_dec):
-            print(f"   leaf[{i}] counts={np.round(c,2)}")
+            print(f"   leaf[{i}] counts={np.round(c, 2)}")
 
 
 if __name__ == "__main__":
