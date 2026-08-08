@@ -1,0 +1,308 @@
+[
+  {
+    "dataset": "iris",
+    "depth": 1,
+    "n_features": 4,
+    "sklearn_acc": 0.6666666666666666,
+    "static_grid": {
+      "acc": 0.6666666666666666,
+      "sigmoid_calls": 24,
+      "reciprocal_calls": 1,
+      "reciprocal_equiv_multiplies": 30,
+      "sqrt_calls": 0
+    },
+    "closed_form": {
+      "acc": 0.6666666666666666,
+      "sigmoid_calls": 8,
+      "reciprocal_calls": 5,
+      "reciprocal_equiv_multiplies": 150,
+      "sqrt_calls": 0
+    },
+    "dynamic_grid": {
+      "acc": 0.6666666666666666,
+      "sigmoid_calls": 24,
+      "reciprocal_calls": 9,
+      "reciprocal_equiv_multiplies": 270,
+      "sqrt_calls": 4
+    },
+    "gradient_refine": {
+      "acc": 0.6666666666666666,
+      "sigmoid_calls": 20,
+      "reciprocal_calls": 5,
+      "reciprocal_equiv_multiplies": 150,
+      "sqrt_calls": 0
+    }
+  },
+  {
+    "dataset": "iris",
+    "depth": 2,
+    "n_features": 4,
+    "sklearn_acc": 0.9333333333333333,
+    "static_grid": {
+      "acc": 0.9666666666666667,
+      "sigmoid_calls": 72,
+      "reciprocal_calls": 3,
+      "reciprocal_equiv_multiplies": 90,
+      "sqrt_calls": 0
+    },
+    "closed_form": {
+      "acc": 0.9333333333333333,
+      "sigmoid_calls": 24,
+      "reciprocal_calls": 15,
+      "reciprocal_equiv_multiplies": 450,
+      "sqrt_calls": 0
+    },
+    "dynamic_grid": {
+      "acc": 0.9333333333333333,
+      "sigmoid_calls": 72,
+      "reciprocal_calls": 27,
+      "reciprocal_equiv_multiplies": 810,
+      "sqrt_calls": 12
+    },
+    "gradient_refine": {
+      "acc": 0.9,
+      "sigmoid_calls": 60,
+      "reciprocal_calls": 15,
+      "reciprocal_equiv_multiplies": 450,
+      "sqrt_calls": 0
+    }
+  },
+  {
+    "dataset": "iris",
+    "depth": 3,
+    "n_features": 4,
+    "sklearn_acc": 0.9666666666666667,
+    "static_grid": {
+      "acc": 0.9,
+      "sigmoid_calls": 168,
+      "reciprocal_calls": 7,
+      "reciprocal_equiv_multiplies": 210,
+      "sqrt_calls": 0
+    },
+    "closed_form": {
+      "acc": 0.9333333333333333,
+      "sigmoid_calls": 56,
+      "reciprocal_calls": 35,
+      "reciprocal_equiv_multiplies": 1050,
+      "sqrt_calls": 0
+    },
+    "dynamic_grid": {
+      "acc": 0.9333333333333333,
+      "sigmoid_calls": 168,
+      "reciprocal_calls": 63,
+      "reciprocal_equiv_multiplies": 1890,
+      "sqrt_calls": 28
+    },
+    "gradient_refine": {
+      "acc": 0.9333333333333333,
+      "sigmoid_calls": 140,
+      "reciprocal_calls": 35,
+      "reciprocal_equiv_multiplies": 1050,
+      "sqrt_calls": 0
+    }
+  },
+  {
+    "dataset": "wine",
+    "depth": 1,
+    "n_features": 13,
+    "sklearn_acc": 0.6,
+    "static_grid": {
+      "acc": 0.6666666666666666,
+      "sigmoid_calls": 78,
+      "reciprocal_calls": 1,
+      "reciprocal_equiv_multiplies": 30,
+      "sqrt_calls": 0
+    },
+    "closed_form": {
+      "acc": 0.7333333333333333,
+      "sigmoid_calls": 26,
+      "reciprocal_calls": 14,
+      "reciprocal_equiv_multiplies": 420,
+      "sqrt_calls": 0
+    },
+    "dynamic_grid": {
+      "acc": 0.7333333333333333,
+      "sigmoid_calls": 78,
+      "reciprocal_calls": 27,
+      "reciprocal_equiv_multiplies": 810,
+      "sqrt_calls": 13
+    },
+    "gradient_refine": {
+      "acc": 0.7,
+      "sigmoid_calls": 65,
+      "reciprocal_calls": 14,
+      "reciprocal_equiv_multiplies": 420,
+      "sqrt_calls": 0
+    }
+  },
+  {
+    "dataset": "wine",
+    "depth": 2,
+    "n_features": 13,
+    "sklearn_acc": 0.8666666666666667,
+    "static_grid": {
+      "acc": 0.7333333333333333,
+      "sigmoid_calls": 234,
+      "reciprocal_calls": 3,
+      "reciprocal_equiv_multiplies": 90,
+      "sqrt_calls": 0
+    },
+    "closed_form": {
+      "acc": 0.9,
+      "sigmoid_calls": 78,
+      "reciprocal_calls": 42,
+      "reciprocal_equiv_multiplies": 1260,
+      "sqrt_calls": 0
+    },
+    "dynamic_grid": {
+      "acc": 0.7,
+      "sigmoid_calls": 234,
+      "reciprocal_calls": 81,
+      "reciprocal_equiv_multiplies": 2430,
+      "sqrt_calls": 39
+    },
+    "gradient_refine": {
+      "acc": 0.8333333333333334,
+      "sigmoid_calls": 195,
+      "reciprocal_calls": 42,
+      "reciprocal_equiv_multiplies": 1260,
+      "sqrt_calls": 0
+    }
+  },
+  {
+    "dataset": "wine",
+    "depth": 3,
+    "n_features": 13,
+    "sklearn_acc": 0.9666666666666667,
+    "static_grid": {
+      "acc": 0.9333333333333333,
+      "sigmoid_calls": 546,
+      "reciprocal_calls": 7,
+      "reciprocal_equiv_multiplies": 210,
+      "sqrt_calls": 0
+    },
+    "closed_form": {
+      "acc": 0.9666666666666667,
+      "sigmoid_calls": 182,
+      "reciprocal_calls": 98,
+      "reciprocal_equiv_multiplies": 2940,
+      "sqrt_calls": 0
+    },
+    "dynamic_grid": {
+      "acc": 0.9333333333333333,
+      "sigmoid_calls": 546,
+      "reciprocal_calls": 189,
+      "reciprocal_equiv_multiplies": 5670,
+      "sqrt_calls": 91
+    },
+    "gradient_refine": {
+      "acc": 0.9333333333333333,
+      "sigmoid_calls": 455,
+      "reciprocal_calls": 98,
+      "reciprocal_equiv_multiplies": 2940,
+      "sqrt_calls": 0
+    }
+  },
+  {
+    "dataset": "breast_cancer",
+    "depth": 1,
+    "n_features": 30,
+    "sklearn_acc": 0.9333333333333333,
+    "static_grid": {
+      "acc": 0.9333333333333333,
+      "sigmoid_calls": 180,
+      "reciprocal_calls": 1,
+      "reciprocal_equiv_multiplies": 30,
+      "sqrt_calls": 0
+    },
+    "closed_form": {
+      "acc": 0.8333333333333334,
+      "sigmoid_calls": 60,
+      "reciprocal_calls": 31,
+      "reciprocal_equiv_multiplies": 930,
+      "sqrt_calls": 0
+    },
+    "dynamic_grid": {
+      "acc": 0.8666666666666667,
+      "sigmoid_calls": 180,
+      "reciprocal_calls": 61,
+      "reciprocal_equiv_multiplies": 1830,
+      "sqrt_calls": 30
+    },
+    "gradient_refine": {
+      "acc": 0.6333333333333333,
+      "sigmoid_calls": 150,
+      "reciprocal_calls": 31,
+      "reciprocal_equiv_multiplies": 930,
+      "sqrt_calls": 0
+    }
+  },
+  {
+    "dataset": "breast_cancer",
+    "depth": 2,
+    "n_features": 30,
+    "sklearn_acc": 0.8333333333333334,
+    "static_grid": {
+      "acc": 0.9666666666666667,
+      "sigmoid_calls": 540,
+      "reciprocal_calls": 3,
+      "reciprocal_equiv_multiplies": 90,
+      "sqrt_calls": 0
+    },
+    "closed_form": {
+      "acc": 0.9333333333333333,
+      "sigmoid_calls": 180,
+      "reciprocal_calls": 93,
+      "reciprocal_equiv_multiplies": 2790,
+      "sqrt_calls": 0
+    },
+    "dynamic_grid": {
+      "acc": 1.0,
+      "sigmoid_calls": 540,
+      "reciprocal_calls": 183,
+      "reciprocal_equiv_multiplies": 5490,
+      "sqrt_calls": 90
+    },
+    "gradient_refine": {
+      "acc": 0.8333333333333334,
+      "sigmoid_calls": 450,
+      "reciprocal_calls": 93,
+      "reciprocal_equiv_multiplies": 2790,
+      "sqrt_calls": 0
+    }
+  },
+  {
+    "dataset": "breast_cancer",
+    "depth": 3,
+    "n_features": 30,
+    "sklearn_acc": 0.9666666666666667,
+    "static_grid": {
+      "acc": 1.0,
+      "sigmoid_calls": 1260,
+      "reciprocal_calls": 7,
+      "reciprocal_equiv_multiplies": 210,
+      "sqrt_calls": 0
+    },
+    "closed_form": {
+      "acc": 1.0,
+      "sigmoid_calls": 420,
+      "reciprocal_calls": 217,
+      "reciprocal_equiv_multiplies": 6510,
+      "sqrt_calls": 0
+    },
+    "dynamic_grid": {
+      "acc": 1.0,
+      "sigmoid_calls": 1260,
+      "reciprocal_calls": 427,
+      "reciprocal_equiv_multiplies": 12810,
+      "sqrt_calls": 210
+    },
+    "gradient_refine": {
+      "acc": 0.9333333333333333,
+      "sigmoid_calls": 1050,
+      "reciprocal_calls": 217,
+      "reciprocal_equiv_multiplies": 6510,
+      "sqrt_calls": 0
+    }
+  }
+]

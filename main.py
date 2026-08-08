@@ -1,196 +1,277 @@
-from train_tree import train_and_extract
-from ckks_tree import COMPARE_SCALE, create_ckks_context, predict_ckks
-from sklearn.metrics import confusion_matrix
-import numpy as np
+"""EncryptedFixedDepthTreeModel(임의 depth)용 fully encrypted inference.
+
+새 sample을 encrypt -> 한 번도 decrypt하지 않고 root부터 leaf까지 soft traversal ->
+최종 class_scores만 client가 decrypt해서 plaintext argmax (논문 Section 4.1 방식).
+
+encrypt_inference_sample()/encrypted_predict_class()/debug_decrypt_class_scores()는
+depth와 무관한 "sample 하나 encrypt", "score decrypt+argmax" 단계라
+client_assisted.inference에 있는 걸 그대로 재사용한다 (중복 구현 안 함).
+
+--depth 2로 실행하면 예전 encrypted_depth2_inference.py(삭제됨)와 동일한 결과를 낸다
+(EXPERIMENT_LOG.md 2026-07-07 참고, 100% 일치 재확인 후 depth2 전용 코드를 정리했다).
+"""
+
+from __future__ import annotations
+
+import argparse
+import gc
 import time
 
+import numpy as np
+from tqdm import tqdm
 
-def sync_engine_if_needed(ctx: dict) -> None:
-    """DESILO FHE async GPU mode에서만 engine 작업 완료를 기다림."""
-    try:
-        ctx["engine"].sync()
-    except RuntimeError as exc:
-        if "Async GPU mode" not in str(exc):
-            raise
-
-
-def print_confusion_matrix(
-    y_true: np.ndarray,
-    y_pred: np.ndarray | list[int],
-    class_names: list[str],
-    title: str = "Confusion Matrix",
-) -> None:
-    """정답/예측 라벨로 confusion matrix를 출력."""
-    cm = confusion_matrix(y_true, y_pred, labels=list(range(len(class_names))))
-    # 긴 이름 대비 컬럼 폭을 동적으로 조정
-    col_w = max(12, max(len(n) for n in class_names) + 2)
-    print(f"\n[{title}]")
-    print(f"{'':>{col_w}}", end="")
-    for name in class_names:
-        print(f"{name:>{col_w}}", end="")
-    print()
-    for i, row in enumerate(cm):
-        print(f"{class_names[i]:>{col_w}}", end="")
-        for val in row:
-            print(f"{val:>{col_w}}", end="")
-        print()
+from client_assisted import (
+    EncryptedDataset,
+    EncryptedFixedDepthTreeModel,
+    EncryptedTrainingContext,
+    create_context,
+    debug_decrypt_class_scores,
+    debug_decrypt_fixed_depth_leaf_counts,
+    encrypt_dataset,
+    encrypt_inference_sample,
+    encrypted_predict_class,
+    format_float_list,
+    load_scaled_dataset_subset,
+    make_public_grid_candidates,
+    make_small_public_threshold_grid,
+    one_hot_encode,
+    predict_fixed_depth_soft_plaintext,
+    server_compute_weighted_child_weights,
+    sync_engine_if_needed,
+    train_client_assisted_fixed_depth_tree,
+)
 
 
-def print_compare_input_range(
-    X_test: np.ndarray,
-    structure: dict,
-    compare_scale: float,
-) -> None:
-    """평문 기준으로 각 decision node의 sigmoid 비교 입력 범위를 출력."""
-    children_left = structure["children_left"]
-    feature = structure["feature"]
-    threshold = structure["threshold"]
-    leaf = -1
+def encrypted_traverse_and_predict_fixed_depth(
+    ctx: EncryptedTrainingContext,
+    model: EncryptedFixedDepthTreeModel,
+    enc_sample: list,
+) -> list:
+    """root부터 model.depth까지 encrypted 상태로 재귀적으로 soft traversal.
 
-    global_min = None
-    global_max = None
-
-    print("\n[Compare input range 진단]")
-    print(f"compare_scale: {compare_scale}")
-
-    for node_id, left_child in enumerate(children_left):
-        if left_child == leaf:
-            continue
-
-        feature_idx = feature[node_id]
-        thresh = threshold[node_id]
-        raw_diff = X_test[:, feature_idx] - thresh
-        compare_input = compare_scale * raw_diff
-
-        node_min = float(np.min(compare_input))
-        node_max = float(np.max(compare_input))
-        global_min = node_min if global_min is None else min(global_min, node_min)
-        global_max = node_max if global_max is None else max(global_max, node_max)
-
-        print(
-            f"node {node_id} | feature={feature_idx} | threshold={thresh:.6f} | "
-            f"raw_diff min/max=({np.min(raw_diff):.6f}, {np.max(raw_diff):.6f}) | "
-            f"compare_input min/max=({node_min:.6f}, {node_max:.6f})"
-        )
-
-    if global_min is None or global_max is None:
-        print("decision node가 없습니다.")
-    else:
-        print(
-            "global compare_input min/max="
-            f"({global_min:.6f}, {global_max:.6f})"
-        )
-
-
-def run_dataset(
-    dataset_name: str,
-    scaler_name: str,
-    threshold_tuning: str,
-    ctx: dict,
-) -> None:
-    """한 데이터셋에 대해 평문 DT vs CKKS DT 정확도 비교."""
-    print(
-        f"\n=========== dataset: {dataset_name} | "
-        f"scaler: {scaler_name} | "
-        f"threshold_tuning: {threshold_tuning} ==========="
+    client_assisted.verification.plaintext_fixed_depth_leaf_weights()의 재귀 walk와
+    같은 구조이지만, sigmoid를 plaintext로 계산하는 대신 model.node_splits(encrypted
+    split)와 server_compute_weighted_child_weights로 encrypted 상태를 유지한다.
+    이 함수 내부에서는 decrypt를 절대 호출하지 않는다.
+    """
+    sample_dataset = EncryptedDataset(
+        enc_features=enc_sample,
+        enc_labels=[],
+        n_samples=1,
+        n_features=len(enc_sample),
+        n_classes=0,
     )
-    clf, structure, X_test, y_test, class_names = train_and_extract(
+
+    leaf_weights: list = []
+    split_idx = 0
+
+    def walk(enc_node_weight, current_depth: int) -> None:
+        nonlocal split_idx
+        if current_depth == model.depth:
+            leaf_weights.append(enc_node_weight)
+            return
+
+        split = model.node_splits[split_idx]
+        split_idx += 1
+        left_weight, right_weight = server_compute_weighted_child_weights(
+            ctx,
+            sample_dataset,
+            split,
+            enc_node_weight,
+        )
+        del enc_node_weight
+        walk(left_weight, current_depth + 1)
+        walk(right_weight, current_depth + 1)
+
+    root_weight = ctx.engine.encrypt([1.0], ctx.pk)
+    walk(root_weight, current_depth=0)
+
+    n_classes = len(model.leaf_counts[0])
+    class_scores: list = [None] * n_classes
+    for leaf_weight, leaf_counts in zip(leaf_weights, model.leaf_counts):
+        for class_idx, leaf_count in enumerate(leaf_counts):
+            piece = ctx.engine.multiply(leaf_weight, leaf_count, ctx.rlk)
+            if class_scores[class_idx] is None:
+                class_scores[class_idx] = piece
+            else:
+                class_scores[class_idx] = ctx.engine.add(class_scores[class_idx], piece)
+
+    del leaf_weights
+    return class_scores
+
+
+def default_max_level_for_depth(depth: int) -> int:
+    """--max-level을 안 주면 depth에 맞는 안전한 기본값을 고른다.
+
+    depth>=3은 iris/wine/breast_cancer × depth=3,4,5 전체 9개 조합(candidate_count
+    기본값 3 그대로)을 max_level=15로 실측 검증함 (EXPERIMENT_LOG.md 2026-07-07,
+    "candidate 스트리밍 리팩터링" 이후 재테스트 참고). candidate를 server_ops.py+
+    client_ops.py+training.py에서 "전부 계산 후 선택"이 아니라 "하나씩 계산->점수 확인
+    ->즉시 폐기" 스트리밍 방식으로 바꾼 뒤로 peak 메모리가 O(candidates)에서 O(1)로
+    줄어서, 예전에 데이터셋/depth마다 다르게 튜닝해야 했던 max_level이 15 하나로
+    통일됐다 (breast_cancer depth=5, candidate=90개 그대로도 OOM 없이 성공).
+    depth<=2는 이 재테스트 범위 밖이라 예전 값을 그대로 유지.
+    """
+    if depth <= 1:
+        return 20
+    if depth == 2:
+        return 25
+    return 15
+
+
+def run_fixed_depth_encrypted_inference(
+    dataset_name: str = "iris",
+    depth: int = 3,
+    test_size: int = 30,
+    candidate_count: int = 3,
+    max_level: int | None = None,
+    mode: str = "gpu",
+    slot_count: int | None = None,
+) -> None:
+    """test_size(기본 30개, 고정)만 test로 떼어내고 dataset 나머지 전체를 train으로 써서
+    fixed-depth 모델을 학습하고, test set 전체를 encrypted inference로 검증.
+
+    max_level=None이면 default_max_level_for_depth(depth)로 depth에 맞는 안전한 값을 쓴다.
+    """
+    if max_level is None:
+        max_level = default_max_level_for_depth(depth)
+
+    X_train, X_test, y_train, y_test, class_names = load_scaled_dataset_subset(
         dataset_name=dataset_name,
-        scaler_name=scaler_name,
-        threshold_tuning=threshold_tuning,
+        test_size=test_size,
     )
-    n_samples = len(X_test)
-    n_features = X_test.shape[1]
-    n_nodes = len(structure["children_left"])
-    n_classes = len(class_names)
+    y_train_one_hot = one_hot_encode(y_train, n_classes=len(class_names))
+    candidates = make_public_grid_candidates(
+        n_features=X_train.shape[1],
+        thresholds=make_small_public_threshold_grid(candidate_count=candidate_count),
+    )
 
-    print("\n[실험 정보]")
-    print(f"Dataset 이름: {dataset_name}")
-    print(f"Scaler 이름: {scaler_name}")
-    print(f"Threshold tuning: {threshold_tuning}")
-    print(f"클래스 이름: {class_names}")
-    print(f"클래스 수: {n_classes}")
-    print(f"테스트 샘플 수: {n_samples}")
-    print(f"feature 수: {n_features}")
-    print(f"tree node 수: {n_nodes}")
+    print(
+        f"[setup] dataset={dataset_name} | depth={depth} | candidates={len(candidates)} | "
+        f"train_samples={X_train.shape[0]} | test_samples={X_test.shape[0]} | "
+        f"n_features={X_train.shape[1]} | max_level={max_level} | mode={mode} | "
+        f"slot_count={slot_count if slot_count is not None else 'auto'}",
+        flush=True,
+    )
 
-    # 일반 Decision Tree
-    y_pred_plain = clf.predict(X_test)
-    plain_acc = np.mean(y_pred_plain == y_test) * 100
-    print_confusion_matrix(y_test, y_pred_plain, class_names, "일반 Decision Tree")
+    ctx = create_context(mode=mode, max_level=max_level, slot_count=slot_count)
+    dataset = encrypt_dataset(ctx, X_train, y_train_one_hot)
 
-    print_compare_input_range(X_test, structure, COMPARE_SCALE)
+    train_start = time.time()
+    model, selections = train_client_assisted_fixed_depth_tree(
+        ctx, dataset, candidates, depth=depth
+    )
+    sync_engine_if_needed(ctx)
+    train_time = time.time() - train_start
+    print(
+        f"[training] mode={mode} | total={train_time:.2f}s ({train_time / 60:.2f}min) | "
+        f"nodes={len(model.node_splits)} | {train_time / len(model.node_splits):.3f}s/node",
+        flush=True,
+    )
 
-    # CKKS 추론
-    print("\nCKKS 클래스 분류 중...")
-    y_pred_ckks = []
-    total_start = time.time()
-    for i in range(n_samples):
-        sample = X_test[i]
-        sample_start = time.time()
-        print(f"[CKKS] sample {i + 1}/{n_samples} 시작", flush=True)
-        pred = predict_ckks(ctx, sample, structure)
+    encrypted_leaf_counts = debug_decrypt_fixed_depth_leaf_counts(ctx, model)
+    plaintext_pred = predict_fixed_depth_soft_plaintext(
+        X_test,
+        selections,
+        encrypted_leaf_counts,
+    )
+
+    print(f"\n[{dataset_name} depth={depth} encrypted inference]", flush=True)
+    print(
+        f"mode={ctx.mode} | candidates={len(candidates)} | test_samples={X_test.shape[0]} | n_features={X_train.shape[1]}",
+        flush=True,
+    )
+    print(f"split_nodes={len(model.node_splits)} | leaf_nodes={len(model.leaf_counts)}", flush=True)
+
+    encrypted_pred = []
+    sample_times = []
+    n_test = X_test.shape[0]
+    for i in tqdm(range(n_test), desc="[inference] samples"):
+        start = time.time()
+        enc_sample = encrypt_inference_sample(ctx, X_test[i], ctx.pk)
+        class_scores = encrypted_traverse_and_predict_fixed_depth(ctx, model, enc_sample)
+        pred_class = encrypted_predict_class(ctx, class_scores, ctx.sk)
         sync_engine_if_needed(ctx)
-        y_pred_ckks.append(pred)
-        sample_elapsed = time.time() - sample_start
-        print(
-            f"[CKKS] sample {i + 1}/{n_samples} 완료 | "
-            f"pred={pred} | true={y_test[i]} | time={sample_elapsed:.2f}s",
-            flush=True,
+        del enc_sample, class_scores
+        gc.collect()
+        elapsed = time.time() - start
+        sample_times.append(elapsed)
+        encrypted_pred.append(pred_class)
+        tqdm.write(
+            f"[inference] sample {i + 1}/{n_test} | "
+            f"pred={pred_class} | true={y_test[i]} | time={elapsed:.3f}s"
         )
 
-    total_elapsed = time.time() - total_start
-    ckks_acc = np.mean(np.array(y_pred_ckks) == y_test) * 100
-    match_count = int(np.sum(y_pred_plain == np.array(y_pred_ckks)))
+    encrypted_pred_arr = np.array(encrypted_pred)
+    match_rate = float(np.mean(encrypted_pred_arr == plaintext_pred))
+    encrypted_test_acc = float(np.mean(encrypted_pred_arr == y_test))
+    plaintext_test_acc = float(np.mean(plaintext_pred == y_test))
+    total_time = float(np.sum(sample_times))
 
-    print_confusion_matrix(y_test, y_pred_ckks, class_names, "CKKS Decision Tree")
+    print("\n--- 결과 비교 ---", flush=True)
+    print(f"class_names={class_names}")
+    print(f"encrypted vs plaintext 예측 일치율: {match_rate * 100:.2f}%")
+    print(f"encrypted test accuracy: {encrypted_test_acc * 100:.2f}%")
+    print(f"plaintext test accuracy (predict_fixed_depth_soft_plaintext): {plaintext_test_acc * 100:.2f}%")
+    print(f"encrypted inference 총 소요시간: {total_time:.2f}s ({total_time / len(sample_times):.3f}s/sample)")
 
-    # 결과 비교
-    print("\n--- 결과 비교 ---")
-    print(f"Dataset 이름: {dataset_name}")
-    print(f"Scaler 이름: {scaler_name}")
-    print(f"Threshold tuning: {threshold_tuning}")
-    print(f"클래스 이름: {class_names}")
-    print(f"클래스 수: {n_classes}")
-    print(f"테스트 샘플 수: {n_samples}")
-    print(f"feature 수: {n_features}")
-    print(f"tree node 수: {n_nodes}")
-    print(f"Plain DT accuracy: {plain_acc:.2f}%")
-    print(f"CKKS DT accuracy: {ckks_acc:.2f}%")
-    print(f"Plain/CKKS match count: {match_count}/{n_samples}")
-    print(f"CKKS total time: {total_elapsed:.2f}s")
-    print(f"CKKS per sample time: {total_elapsed / n_samples:.2f}s")
-    print(f"정확도 차이 : {abs(plain_acc - ckks_acc):.1f}%p")
+    mismatch_indices = np.where(encrypted_pred_arr != plaintext_pred)[0]
+    if len(mismatch_indices) > 0:
+        print(f"\n불일치 sample 수: {len(mismatch_indices)} | indices={mismatch_indices.tolist()}")
+        for idx in mismatch_indices:
+            enc_sample = encrypt_inference_sample(ctx, X_test[idx], ctx.pk)
+            class_scores = encrypted_traverse_and_predict_fixed_depth(ctx, model, enc_sample)
+            decrypted_scores = debug_decrypt_class_scores(ctx, class_scores)
+            print(
+                f"  idx={idx} | encrypted class_scores decrypt={format_float_list(np.array(decrypted_scores))} | "
+                f"plaintext_pred={int(plaintext_pred[idx])} | encrypted_pred={int(encrypted_pred_arr[idx])}"
+            )
+    else:
+        print("\nencrypted 예측과 plaintext 예측이 test set 전체에서 100% 일치.")
 
 
-def main():
-    # CKKS context는 데이터셋과 무관하므로 한 번만 생성해서 재사용
-    ctx = create_ckks_context(mode="gpu", device_id=0)
-    print(
-        f"[CKKS Engine] mode={ctx['mode']} | device_id={ctx['device_id']} | "
-        f"max_level={ctx['engine'].max_level} | slot_count={ctx['engine'].slot_count} | "
-        f"sigmoid_degree={ctx['sigmoid_degree']}"
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="fixed-depth(임의 depth) client-assisted encrypted training + encrypted inference"
     )
-
-    experiments = [
-        ("iris", "minmax_minus1_1", "soft_surrogate"),
-        ("wine", "minmax_minus1_1", "soft_surrogate"),
-        ("breast_cancer", "minmax_minus1_1", "soft_surrogate"),
-    ]
-
-    # experiments = [
-    #     ("iris", "none", "none"),
-    #     ("iris", "minmax_minus1_1", "soft_surrogate"),
-    #     ("wine", "none", "none"),
-    #     ("wine", "minmax_minus1_1", "none"),
-    #     ("wine", "minmax_minus1_1", "soft_surrogate"),
-    #     ("breast_cancer", "none", "none"),
-    #     ("breast_cancer", "minmax_minus1_1", "soft_surrogate"),
-    # ]
-
-    for dataset_name, scaler_name, threshold_tuning in experiments:
-        run_dataset(dataset_name, scaler_name, threshold_tuning, ctx)
+    parser.add_argument("--dataset", default="iris", choices=["iris", "wine", "breast_cancer"])
+    parser.add_argument("--depth", type=int, default=3)
+    parser.add_argument(
+        "--test-size",
+        type=int,
+        default=30,
+        help="test set 개수 (고정). train은 dataset 나머지 전체를 사용",
+    )
+    parser.add_argument("--candidate-count", type=int, default=3, help="feature당 threshold candidate 개수")
+    parser.add_argument(
+        "--max-level",
+        type=int,
+        default=None,
+        help="안 주면 depth에 맞는 안전한 기본값 사용 (depth=2->25, depth=3->30)",
+    )
+    parser.add_argument(
+        "--mode",
+        default="gpu",
+        choices=["gpu", "cpu"],
+        help="desilofhe Engine backend (논문의 single-core CPU 조건과 비교하려면 cpu)",
+    )
+    parser.add_argument(
+        "--slot-count",
+        type=int,
+        default=None,
+        help="ciphertext 슬롯 수 고정 (논문은 SEAL poly modulus degree 8192 -> 4096 packing 사용)",
+    )
+    return parser.parse_args()
 
 
 if __name__ == "__main__":
-    main()
+    args = _parse_args()
+    run_fixed_depth_encrypted_inference(
+        dataset_name=args.dataset,
+        depth=args.depth,
+        test_size=args.test_size,
+        candidate_count=args.candidate_count,
+        max_level=args.max_level,
+        mode=args.mode,
+        slot_count=args.slot_count,
+    )
