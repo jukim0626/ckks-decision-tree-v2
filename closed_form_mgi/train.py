@@ -14,21 +14,30 @@ CKKS로 아직 안 옮겼다). 이 파일은 우선 **고정 정규화(score_nor
 쓴다 - depth=1은 이걸로 충분(고정/range 정규화 정확도 동일 확인됨), depth>=2는 정확도가
 plaintext range-normalization 버전보다 낮을 것으로 예상됨(알려진 한계, 실측 필요).
 
-**train/inference 분리 관련 메모리 주의**: 원래(분리 전) 코드는 노드 하나를 처리할 때마다
-train weight와 test weight를 동시에 계산하고 바로 버렸다 (peak 메모리 억제 목적, OOM 이력
-있음). 분리 후에는 학습이 끝날 때까지 전체 트리의 노드별 thresholds/weights를
-`ClosedFormMgiTreeModel.nodes`에 들고 있어야 라우팅(inference.py)이 나중에 재사용할 수
-있다 - depth가 커지면 peak 메모리가 O(depth)에서 O(2^depth)로 늘어난다. depth=1로 먼저
-검증하고 depth를 올리면서 메모리 문제가 없는지 확인할 것.
+**노드별 프로세스 분리 (2026-08-11)**: 노드 하나 처리(threshold의 30회 + soft-MGI weight의
+40회 뉴턴-랩슨 반복)를 거치면 GPU 메모리가 계속 쌓이는데, ciphertext를 개별적으로
+del+gc.collect()해도 거의 안 줄어든다 - desilofhe가 key가 살아있는 동안 ciphertext 메모리
+풀 전체를 붙잡고 있어서, key까지 지워야(=프로세스가 죽어야) OS가 회수한다(leak_probe 실측:
+del+gc.collect(loop 변수만)로는 9404->9380MiB, key까지 지우면 9380->5288MiB). 그래서
+`train_closed_form_mgi_tree`는 노드 계산 자체를 하지 않고, key/dataset을 임시 디렉터리에
+직렬화해둔 뒤 노드마다 `node_worker.py`를 별도 프로세스로 실행해서 그 프로세스가 끝날 때
+GPU 메모리가 강제로 회수되게 한다 (`ensure_level(min_level=16)` 파라미터를 줄여서 ciphertext
+자체를 작게 만드는 시도는 production beta=30에서 정확도가 깨져서 기각 - EXPERIMENT_LOG.md
+2026-08-11 참고).
 """
 
 from __future__ import annotations
 
 import gc
+import json
+import subprocess
+import sys
+import tempfile
 import time
+from pathlib import Path
 
 from ckks_tree import sigmoid_approx_enc
-from client_assisted.server_ops import encrypted_class_counts
+from closed_form_mgi.io_utils import write_dataset, write_keys
 from closed_form_mgi.model import ClosedFormMgiNode, ClosedFormMgiTreeModel
 from closed_form_mgi.primitives import (
     encrypted_mgi_from_counts,
@@ -59,13 +68,16 @@ def encrypted_weighted_threshold(ctx, enc_feature, enc_node_weights, n_samples: 
     y0 = 1.0 / n_samples
     z = ctx.engine.multiply(weighted_count, y0)
     w = ctx.engine.multiply(weighted_sum, y0)
-    for _ in range(iterations):
+    for i in range(iterations):
         z = ensure_level(ctx, z)
         w = ensure_level(ctx, w)
         two_minus_z = ctx.engine.subtract(2.0, z)
         z_new = ctx.engine.multiply(z, two_minus_z, ctx.rlk)
         w = ctx.engine.multiply(w, two_minus_z, ctx.rlk)
         z = z_new
+        del two_minus_z
+        if i % 5 == 0:
+            gc.collect()
     return w
 
 
@@ -124,6 +136,41 @@ def evaluate_closed_form_candidates_from_thresholds(ctx, dataset, enc_node_weigh
     return packed_score, gates, n_pow2, n_features
 
 
+def process_single_node(ctx, dataset, enc_train_weights, beta: float, score_normalizer: float):
+    """노드 하나의 threshold/soft-MGI weight/blended gate 계산 - node_worker.py(별도
+    프로세스)와 이 파일 양쪽에서 재사용하는 핵심 로직. 반환: (thresholds, weights,
+    left_train, right_train)."""
+    enc_train_weights = ensure_level(ctx, enc_train_weights, min_level=16)
+
+    thresholds = [
+        encrypted_weighted_threshold(ctx, dataset.enc_features[j], enc_train_weights, dataset.n_samples)
+        for j in range(dataset.n_features)
+    ]
+    packed_score, gates, n_pow2, n_features = evaluate_closed_form_candidates_from_thresholds(
+        ctx, dataset, enc_train_weights, thresholds, score_normalizer
+    )
+    # packed_score는 이미 evaluate_closed_form_candidates_from_thresholds 안에서
+    # score_normalizer로 정규화됐으므로, 여기서는 1.0을 넘겨 이중 정규화를 막는다.
+    weights = soft_mgi_weights(ctx, packed_score, n_features, n_pow2, 1.0, beta)
+    blended_gate = blended_gate_from_gates(ctx, gates, weights)
+
+    right_train = ctx.engine.multiply(enc_train_weights, blended_gate, ctx.rlk)
+    left_train = ctx.engine.multiply(enc_train_weights, ctx.engine.subtract(1.0, blended_gate), ctx.rlk)
+    return thresholds, weights, left_train, right_train
+
+
+def _run_worker(session_dir: Path, module: str, *args: str) -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", module, str(session_dir), *args],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"{module} 실패 (args={args}):\n--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"
+        )
+
+
 def train_closed_form_mgi_tree(
     ctx,
     train_dataset,
@@ -135,52 +182,84 @@ def train_closed_form_mgi_tree(
     """client decrypt 없이, grid 없는 closed-form threshold + soft-MGI blend로 depth짜리
     tree를 학습. 반환: ClosedFormMgiTreeModel (노드별 thresholds/weights + leaf_counts,
     전부 pre-order). 새 dataset(test든 임의 샘플이든)을 이 모델로 라우팅하려면
-    closed_form_mgi/inference.py의 route_dataset_through_model()을 쓴다."""
+    closed_form_mgi/inference.py의 route_dataset_through_model()을 쓴다.
+
+    **노드마다 별도 프로세스**(node_worker.py)에서 계산한다 - 2026-08-11 실측: desilofhe는
+    key가 살아있는 동안 ciphertext 메모리 풀을 계속 붙잡고 있어서(del+gc.collect()로는 GPU
+    메모리가 거의 안 줄고, key까지 지워야 줄어듦), 트리 전체를 한 프로세스 안에서 학습하면
+    depth>=2에서 CUDA OOM이 났다(파라미터를 줄이는 시도는 production beta=30에서 정확도가
+    깨져서 기각 - EXPERIMENT_LOG.md 참고). key/dataset은 세션 디렉터리에 한 번만 직렬화해두고
+    노드마다 새 프로세스를 띄워 읽게 해서, 프로세스가 끝날 때 OS가 GPU 메모리를 강제로
+    회수하게 만든다."""
     if score_normalizer is None:
         score_normalizer = float(train_dataset.n_samples**2)
     if depth < 1:
         raise ValueError("depth must be at least 1")
 
     total_nodes = (1 << depth) - 1
-    leaf_train_weights: list = []
+    session_dir = Path(tempfile.mkdtemp(prefix="closed_form_mgi_"))
+    write_keys(ctx, session_dir / "keys")
+    write_dataset(ctx, train_dataset, session_dir / "dataset")
+    config = {
+        "n_features": train_dataset.n_features,
+        "n_classes": train_dataset.n_classes,
+        "n_samples": train_dataset.n_samples,
+        "beta": beta,
+        "score_normalizer": score_normalizer,
+        "mode": ctx.mode,
+        "device_id": ctx.device_id,
+    }
+    (session_dir / "config.json").write_text(json.dumps(config))
+
+    (session_dir / "nodes" / "root").mkdir(parents=True, exist_ok=True)
+    root_weights = ctx.engine.encrypt([1.0] * train_dataset.n_samples, ctx.pk)
+    ctx.engine.write_ciphertext(root_weights, session_dir / "nodes" / "root" / "input_weights.ct")
+    del root_weights
+
     nodes: list = []
-    node_count = [0]
-    root_train_weights = ctx.engine.encrypt([1.0] * train_dataset.n_samples, ctx.pk)
-
-    def train_node(enc_train_weights, current_depth: int) -> None:
+    leaf_ids: list = []
+    node_count = 0
+    # (node_id, depth) 스택 - 오른쪽을 먼저 push해서 왼쪽이 먼저 pop되게 하면 기존
+    # 재귀(train_node(left,...) 먼저 호출)와 동일한 pre-order가 유지된다. node_id는
+    # root에서부터의 L/R 경로 문자열이라 그대로 디렉터리 이름으로 쓴다.
+    stack = [("root", 0)]
+    while stack:
+        node_id, current_depth = stack.pop()
         if current_depth == depth:
-            leaf_train_weights.append(enc_train_weights)
-            return
-        enc_train_weights = ensure_level(ctx, enc_train_weights, min_level=16)
+            leaf_ids.append(node_id)
+            continue
+
         t0 = time.time()
+        _run_worker(session_dir, "closed_form_mgi.node_worker", node_id)
+        node_dir = session_dir / "nodes" / node_id
 
-        thresholds = [
-            encrypted_weighted_threshold(ctx, train_dataset.enc_features[j], enc_train_weights, train_dataset.n_samples)
-            for j in range(train_dataset.n_features)
-        ]
-        packed_score, train_gates, n_pow2, n_features = evaluate_closed_form_candidates_from_thresholds(
-            ctx, train_dataset, enc_train_weights, thresholds, score_normalizer
-        )
-        # packed_score는 이미 evaluate_closed_form_candidates_from_thresholds 안에서
-        # score_normalizer로 정규화됐으므로, 여기서는 1.0을 넘겨 이중 정규화를 막는다.
-        weights = soft_mgi_weights(ctx, packed_score, n_features, n_pow2, 1.0, beta)
-        train_blended_gate = blended_gate_from_gates(ctx, train_gates, weights)
-
+        # 결과를 여기서 바로 ctx.engine.read_ciphertext()로 읽지 않는다 - 2026-08-11 실측:
+        # key가 살아있는 부모 프로세스가 노드마다 결과를 즉시 읽어들이면(fresh read든
+        # to_cuda든 상관없이) 그 메모리 풀이 계속 붙잡혀서 부모 자체가 다시 누적 OOM에
+        # 걸렸다. 파일 경로만 모델에 저장해두고, inference.py가 실제로 그 노드를 쓸 때만
+        # 그때그때 읽고 버리도록 미룬다 (ClosedFormMgiNode 참고).
+        thresholds = [node_dir / f"threshold_{j}.ct" for j in range(train_dataset.n_features)]
+        weights = node_dir / "weights.ct"
         nodes.append(ClosedFormMgiNode(thresholds=thresholds, weights=weights))
 
-        node_count[0] += 1
+        left_id, right_id = node_id + "L", node_id + "R"
+        (session_dir / "nodes" / left_id).mkdir(parents=True, exist_ok=True)
+        (session_dir / "nodes" / right_id).mkdir(parents=True, exist_ok=True)
+        (node_dir / "left_weights.ct").rename(session_dir / "nodes" / left_id / "input_weights.ct")
+        (node_dir / "right_weights.ct").rename(session_dir / "nodes" / right_id / "input_weights.ct")
+
+        node_count += 1
         elapsed = time.time() - t0
         if verbose:
-            print(f"[closed-form train] node {node_count[0]}/{total_nodes} (depth {current_depth}) done | {elapsed:.1f}s", flush=True)
+            print(f"[closed-form train] node {node_count}/{total_nodes} (depth {current_depth}) done | {elapsed:.1f}s", flush=True)
 
-        right_train = ctx.engine.multiply(enc_train_weights, train_blended_gate, ctx.rlk)
-        left_train = ctx.engine.multiply(enc_train_weights, ctx.engine.subtract(1.0, train_blended_gate), ctx.rlk)
-        del enc_train_weights
-        gc.collect()
-        train_node(left_train, current_depth + 1)
-        del left_train
-        train_node(right_train, current_depth + 1)
+        stack.append((right_id, current_depth + 1))
+        stack.append((left_id, current_depth + 1))
 
-    train_node(root_train_weights, current_depth=0)
-    leaf_counts = [encrypted_class_counts(ctx, lw, train_dataset.enc_labels) for lw in leaf_train_weights]
-    return ClosedFormMgiTreeModel(depth=depth, nodes=nodes, leaf_counts=leaf_counts)
+    _run_worker(session_dir, "closed_form_mgi.leaf_worker", ",".join(leaf_ids))
+    leaf_counts = [
+        [session_dir / "nodes" / leaf_id / f"count_{c}.ct" for c in range(train_dataset.n_classes)]
+        for leaf_id in leaf_ids
+    ]
+
+    return ClosedFormMgiTreeModel(depth=depth, nodes=nodes, leaf_counts=leaf_counts, session_dir=session_dir)

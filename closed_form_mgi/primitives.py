@@ -52,8 +52,20 @@ class BootstrapTrainingContext:
     device_id: int
 
 
+def create_bootstrap_engine(mode: str = "gpu", device_id: int = 0) -> Engine:
+    # 2026-08-11에 max_level을 26->17로 줄여봤다가(OOM 완화 목적) 되돌림: slot_count는
+    # 실측상 메모리에 영향이 없고(bootstrap 파라미터셋이 slot_count와 무관하게 물리 ring
+    # 크기가 고정됨), max_level은 26/17/14 세 프리셋뿐이라 중간값이 없는데, 17로 낮추면
+    # production beta=30에서 soft_mgi_weights의 뉴턴-랩슨이 (레벨 여유가 빡빡해져 bootstrap이
+    # 훨씬 자주 걸리면서) "ciphertext 값 크기 2~5 넘으면 bootstrap이 조용히 깨진다"는 기존
+    # 버그를 다시 건드려 완전히 발산했다(디버그: debug_closed_form_pipeline.py로 재현,
+    # weights가 1e90 스케일로 붕괴). 정확도를 지키려면 26(기본)을 써야 한다 - OOM은 파라미터가
+    # 아니라 노드 처리 도중 GPU 메모리가 계속 쌓이는 별도의 leak으로 봐야 함.
+    return Engine(mode=mode, use_bootstrap=True, device_id=device_id)
+
+
 def create_bootstrap_context(mode: str = "gpu", device_id: int = 0) -> BootstrapTrainingContext:
-    engine = Engine(mode=mode, use_bootstrap=True, device_id=device_id)
+    engine = create_bootstrap_engine(mode=mode, device_id=device_id)
     sk = engine.create_secret_key()
     pk = engine.create_public_key(sk)
     rlk = engine.create_relinearization_key(sk)

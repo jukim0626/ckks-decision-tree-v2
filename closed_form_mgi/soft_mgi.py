@@ -21,6 +21,8 @@ depth>=2로 확장할 때 다시 검토해야 한다.
 
 from __future__ import annotations
 
+import gc
+
 import numpy as np
 
 from ckks_tree import sigmoid_approx_enc
@@ -110,13 +112,16 @@ def soft_mgi_weights(
     y0 = 1.0 / n_valid
     z = ctx.engine.multiply(denom, y0)
     w = ctx.engine.multiply(exp_val, y0)
-    for _ in range(reciprocal_iterations):
+    for i in range(reciprocal_iterations):
         z = ensure_level(ctx, z)
         w = ensure_level(ctx, w)
         two_minus_z = ctx.engine.subtract(2.0, z)
         z_new = ctx.engine.multiply(z, two_minus_z, ctx.rlk)
         w = ctx.engine.multiply(w, two_minus_z, ctx.rlk)
         z = z_new
+        del two_minus_z
+        if i % 5 == 0:
+            gc.collect()
 
     return w
 

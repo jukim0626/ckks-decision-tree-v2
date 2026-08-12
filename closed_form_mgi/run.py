@@ -12,6 +12,7 @@ score_normalizer는 고정(n_samples**2)만 씀 - encrypted min/max(soft-min)는
 
 from __future__ import annotations
 
+import shutil
 import sys
 import time
 
@@ -76,13 +77,17 @@ def main():
         elapsed = time.time() - t0
 
         accuracy = float((preds == y_test).mean())
-        leaf_counts_dec = [np.array([decrypt_scalar(ctx, c) for c in lc]) for lc in model.leaf_counts]
+        leaf_counts_dec = [
+            np.array([decrypt_scalar(ctx, ctx.engine.read_ciphertext(c)) for c in lc]) for lc in model.leaf_counts
+        ]
 
         print(f"[depth={depth}] time={elapsed:.2f}s accuracy={accuracy:.4f}")
         print(f"[depth={depth}] call counts={dict(counter.counts)}")
         print(f"[depth={depth}] leaf class distribution:")
         for i, c in enumerate(leaf_counts_dec):
             print(f"   leaf[{i}] counts={np.round(c, 2)}")
+
+        shutil.rmtree(model.session_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

@@ -42,11 +42,19 @@ def route_dataset_through_model(ctx, model, dataset) -> list:
             leaf_weights.append(enc_weights)
             return
         node = next(node_iter)
+        # node.thresholds/node.weights는 ciphertext 객체가 아니라 파일 경로다 - 이 노드를
+        # 실제로 쓰는 동안만 read_ciphertext()로 읽고, 끝나면 참조를 버려서(GC) GPU 메모리를
+        # 낮게 유지한다 (model.py의 ClosedFormMgiNode docstring 참고).
+        thresholds = [ctx.engine.read_ciphertext(p) for p in node.thresholds]
+        weights = ctx.engine.read_ciphertext(node.weights)
+
         enc_weights = ensure_level(ctx, enc_weights, min_level=16)
-        gates = compute_gates_from_thresholds(ctx, dataset, node.thresholds)
-        blended = blended_gate_from_gates(ctx, gates, node.weights)
+        gates = compute_gates_from_thresholds(ctx, dataset, thresholds)
+        blended = blended_gate_from_gates(ctx, gates, weights)
         right = ctx.engine.multiply(enc_weights, blended, ctx.rlk)
         left = ctx.engine.multiply(enc_weights, ctx.engine.subtract(1.0, blended), ctx.rlk)
+
+        del thresholds, weights
         route(left, current_depth + 1)
         route(right, current_depth + 1)
 
@@ -59,13 +67,13 @@ def score_and_predict(ctx, model, leaf_weights: list, n_samples: int, n_classes:
     """model.leaf_counts와 route_dataset_through_model()의 leaf_weights를 decrypt해서
     클래스 점수를 합산하고 argmax. 이 파이프라인에서 유일한 decrypt 지점."""
 
-    def decrypt_scalar(ct) -> float:
-        return float(ctx.engine.decrypt(ct, ctx.sk)[0].real)
+    def decrypt_scalar_path(path) -> float:
+        return float(ctx.engine.decrypt(ctx.engine.read_ciphertext(path), ctx.sk)[0].real)
 
     def decrypt_vector(ct, n: int) -> np.ndarray:
         return np.array([v.real for v in ctx.engine.decrypt(ct, ctx.sk)[:n]])
 
-    leaf_counts_dec = [np.array([decrypt_scalar(c) for c in lc]) for lc in model.leaf_counts]
+    leaf_counts_dec = [np.array([decrypt_scalar_path(c) for c in lc]) for lc in model.leaf_counts]
     leaf_weights_dec = [decrypt_vector(w, n_samples) for w in leaf_weights]
 
     scores = np.zeros((n_samples, n_classes))
