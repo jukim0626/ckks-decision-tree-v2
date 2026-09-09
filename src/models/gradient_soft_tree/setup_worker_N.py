@@ -1,6 +1,13 @@
-"""setup_worker_N.py(axis-aligned)와 완전히 같은 구조 - 파라미터가 alpha/threshold ->
-w/b로 바뀐 것만 다르다. 오케스트레이터 자신이 GPU를 안 잡도록 별도 프로세스로 분리하는
-이유도 동일(depthN_ckks.py 상단 주석 참고)."""
+"""depthN 학습의 최초 setup(key 생성, dataset/초기 파라미터 암호화, session_dir에 직렬화)을
+별도 프로세스로 실행한다.
+
+**왜 필요한가(2026-08-26 depth=3 실패로 발견)**: train_depthN_ckks.py의 오케스트레이터가
+setup까지 자기 프로세스 안에서 직접 하면, 그 프로세스가 (epoch_worker_N을 하나씩 띄우는 동안)
+자기 자신의 GPU context/키를 계속 들고 있게 된다 - epoch_worker_N 프로세스와 **동시에** GPU
+메모리를 점유해서, depth=3처럼 초기 파라미터가 많은 경우(alpha 7개+threshold 28개+leaf
+8개=43개 ciphertext) 부모+자식 합산 메모리가 24GB를 넘어 OOM이 났다(실측: depth=1(파라미터
+8개)은 우연히 버텼지만 depth=3은 epoch 1에서 바로 실패). setup을 별도 프로세스로 끝내고
+죽게 하면, 오케스트레이터 자신은 GPU를 전혀 안 잡아서 이 문제가 원천적으로 없어진다."""
 
 from __future__ import annotations
 
@@ -8,11 +15,11 @@ import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-from client_assisted.dataset import encrypt_dataset, load_scaled_dataset_subset, one_hot_encode  # noqa: E402
-from closed_form_mgi.io_utils import write_dataset, write_keys  # noqa: E402
-from closed_form_mgi.primitives import create_bootstrap_context  # noqa: E402
-from experiments.gradient_soft_tree.oblique.depthN_ckks import init_encrypted_params_N  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from core.data.dataset import encrypt_dataset, load_scaled_dataset_subset, one_hot_encode  # noqa: E402
+from core.data.serialization import write_dataset, write_keys  # noqa: E402
+from core.ckks_engine import create_bootstrap_context  # noqa: E402
+from models.gradient_soft_tree.depthN_ckks import init_encrypted_params_N  # noqa: E402
 
 
 def main() -> None:
@@ -44,9 +51,9 @@ def main() -> None:
     params_dir = session_dir / "params"
     params_dir.mkdir(parents=True, exist_ok=True)
     for i in range(n_internal):
+        ctx.engine.write_ciphertext(params["alpha"][i], params_dir / f"alpha_{i}.ct")
         for j in range(n_features):
-            ctx.engine.write_ciphertext(params["w"][i][j], params_dir / f"w_{i}_{j}.ct")
-        ctx.engine.write_ciphertext(params["b"][i], params_dir / f"b_{i}.ct")
+            ctx.engine.write_ciphertext(params["threshold"][i][j], params_dir / f"threshold_{i}_{j}.ct")
     for l in range(n_leaves):
         ctx.engine.write_ciphertext(params["leaf_logits"][l], params_dir / f"leaf_{l}.ct")
 
