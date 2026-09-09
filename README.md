@@ -53,12 +53,12 @@ All commands run from `src/`, since `core` and `models` are top-level packages t
 cd src
 
 # baseline training
-python -m models.gradient_soft_tree.baseline.train_depthN_ckks <dataset> <depth> <epochs> <lr> <seed> <level_preset>
+python -m models.gradient_soft_tree.baseline.train <dataset> <depth> <epochs> <lr> <seed> <level_preset>
 # example
-python -m models.gradient_soft_tree.baseline.train_depthN_ckks iris 3 35 2.0 0 17
+python -m models.gradient_soft_tree.baseline.train iris 3 35 2.0 0 17
 
 # feature-axis SIMD packing
-python -m models.gradient_soft_tree.packed.train_depthN_packed <dataset> <depth> <epochs> <lr> <seed> <level_preset>
+python -m models.gradient_soft_tree.packed.train <dataset> <depth> <epochs> <lr> <seed> <level_preset>
 ```
 
 `<dataset>` is one of `iris`, `wine`, `breast_cancer`, `digits`, `diabetes`.
