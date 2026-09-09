@@ -29,7 +29,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from core.data.dataset import load_scaled_dataset_subset, one_hot_encode  # noqa: E402
-from models.gradient_soft_tree.baseline.depth1_reference import softmax, softmax_backward  # noqa: E402
+from models.gradient_soft_tree.plaintext_softmax import softmax, softmax_backward  # noqa: E402
 
 
 def train_depthN(

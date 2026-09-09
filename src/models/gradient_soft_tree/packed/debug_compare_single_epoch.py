@@ -14,7 +14,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from core.data.dataset import encrypt_dataset, load_scaled_dataset_subset, one_hot_encode  # noqa: E402
 from core.ckks_engine import create_bootstrap_context  # noqa: E402
-from models.gradient_soft_tree.baseline.depthN_ckks import (  # noqa: E402
+from models.gradient_soft_tree.baseline.tree_ops import (  # noqa: E402
     decrypt_params_N,
     forward_backward_update_N,
     init_encrypted_params_N,

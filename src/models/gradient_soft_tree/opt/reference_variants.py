@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from models.gradient_soft_tree.baseline.depth1_reference import softmax, softmax_backward
+from models.gradient_soft_tree.plaintext_softmax import softmax, softmax_backward
 from models.gradient_soft_tree.opt.config import TreeConfig
 from models.gradient_soft_tree.opt.poly_gate import gate_coeffs, gate_derivative_coeffs
 

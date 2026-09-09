@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from core.approximation.sigmoid import sigmoid_approx_enc  # noqa: E402
 from core.data.dataset import encrypt_dataset, load_scaled_dataset_subset, one_hot_encode  # noqa: E402
 from core.ckks_engine import create_bootstrap_context, ensure_level  # noqa: E402
-from models.gradient_soft_tree.baseline.depthN_ckks import init_encrypted_params_N  # noqa: E402
+from models.gradient_soft_tree.baseline.tree_ops import init_encrypted_params_N  # noqa: E402
 from models.gradient_soft_tree.packed.block_ops import (  # noqa: E402
     assert_layout_fits,
     build_block_masks,

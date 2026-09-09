@@ -9,7 +9,7 @@ import numpy as np
 
 from models.gradient_soft_tree.opt.config import TreeConfig
 from models.gradient_soft_tree.opt.reference_variants import _gate_and_deriv, regularizer_value
-from models.gradient_soft_tree.baseline.depth1_reference import softmax, softmax_backward
+from models.gradient_soft_tree.plaintext_softmax import softmax, softmax_backward
 
 
 def loss_and_analytic_grad(X, y_onehot, depth, alpha, threshold, leaf_logits, config: TreeConfig):

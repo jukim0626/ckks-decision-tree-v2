@@ -4,7 +4,7 @@
 setup/finalize는 baseline 그대로 재사용(`setup_worker_N`/`finalize_worker_N`) - packing은
 params[] 포맷을 안 바꾸므로 그대로 호환된다.
 
-사용법: python -m models.gradient_soft_tree.packed.train_depthN_packed wine 3 10 2.0 0 17
+사용법: python -m models.gradient_soft_tree.packed.train wine 3 10 2.0 0 17
         (dataset, depth, epochs, lr, seed, level_preset)
 """
 
@@ -69,7 +69,7 @@ def train(
     )
     _wait_for_gpu_settle()
     _run(
-        "models.gradient_soft_tree.baseline.setup_worker_N",  # baseline 그대로 재사용
+        "models.gradient_soft_tree.baseline.setup_worker",  # baseline 그대로 재사용
         str(session_dir), dataset_name, str(depth), str(seed), str(lr),
         str(level_preset) if level_preset is not None else "none",
         str(max_train) if max_train is not None else "none",
@@ -102,7 +102,7 @@ def train(
         print(f"[packed {dataset_name} depth={depth}] epoch {epoch}/{n_epochs} done | {elapsed:.1f}s", flush=True)
 
     _wait_for_gpu_settle()
-    stdout = _run("models.gradient_soft_tree.baseline.finalize_worker_N", str(session_dir), str(n_epochs))  # baseline 그대로 재사용
+    stdout = _run("models.gradient_soft_tree.baseline.finalize_worker", str(session_dir), str(n_epochs))  # baseline 그대로 재사용
     result = json.loads(stdout.strip().splitlines()[-1])
     print(
         f"[packed {dataset_name} depth={depth}] max abs diff vs plaintext = {result['max_err']:.5f} | "

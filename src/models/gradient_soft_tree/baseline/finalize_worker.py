@@ -15,8 +15,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from core.data.dataset import load_scaled_dataset_subset  # noqa: E402
 from core.data.serialization import load_context  # noqa: E402
 from core.ckks_engine import create_bootstrap_engine  # noqa: E402
-from models.gradient_soft_tree.baseline.depthN_ckks import decrypt_params_N  # noqa: E402
-from models.gradient_soft_tree.baseline.depthN_reference import predict as plaintext_predict, train_depthN  # noqa: E402
+from models.gradient_soft_tree.baseline.tree_ops import decrypt_params_N  # noqa: E402
+from models.gradient_soft_tree.baseline.reference import predict as plaintext_predict, train_depthN  # noqa: E402
 
 
 def main() -> None:

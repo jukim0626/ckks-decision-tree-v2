@@ -16,7 +16,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from core.data.serialization import load_context  # noqa: E402
 from core.ckks_engine import create_bootstrap_engine  # noqa: E402
-from models.gradient_soft_tree.baseline.depth1_reference import softmax  # noqa: E402
+from models.gradient_soft_tree.plaintext_softmax import softmax  # noqa: E402
 
 
 def main() -> None:

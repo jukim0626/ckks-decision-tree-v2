@@ -9,7 +9,7 @@
 우연히 버팀). setup/finalize를 전부 별도 프로세스로 빼서 오케스트레이터 프로세스 자체는 GPU
 메모리를 0으로 유지한다.
 
-사용법: python -m models.gradient_soft_tree.baseline.train_depthN_ckks iris 3 35 2.0 0
+사용법: python -m models.gradient_soft_tree.baseline.train iris 3 35 2.0 0
         (dataset, depth, epochs, lr, seed)
 """
 
@@ -71,7 +71,7 @@ def train(dataset_name: str, depth: int, n_epochs: int, lr: float, seed: int, le
     )
     _wait_for_gpu_settle()
     _run(
-        "models.gradient_soft_tree.baseline.setup_worker_N",
+        "models.gradient_soft_tree.baseline.setup_worker",
         str(session_dir), dataset_name, str(depth), str(seed), str(lr),
         str(level_preset) if level_preset is not None else "none",
     )
@@ -79,12 +79,12 @@ def train(dataset_name: str, depth: int, n_epochs: int, lr: float, seed: int, le
     for epoch in range(1, n_epochs + 1):
         _wait_for_gpu_settle()
         t0 = time.time()
-        _run("models.gradient_soft_tree.baseline.epoch_worker_N", str(session_dir))
+        _run("models.gradient_soft_tree.baseline.epoch_worker", str(session_dir))
         elapsed = time.time() - t0
         print(f"[{dataset_name} depth={depth}] epoch {epoch}/{n_epochs} done | {elapsed:.1f}s", flush=True)
 
     _wait_for_gpu_settle()
-    stdout = _run("models.gradient_soft_tree.baseline.finalize_worker_N", str(session_dir), str(n_epochs))
+    stdout = _run("models.gradient_soft_tree.baseline.finalize_worker", str(session_dir), str(n_epochs))
     result = json.loads(stdout.strip().splitlines()[-1])
     print(
         f"[{dataset_name} depth={depth}] max abs diff vs plaintext = {result['max_err']:.5f} | "

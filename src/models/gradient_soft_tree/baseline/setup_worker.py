@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from core.data.dataset import encrypt_dataset, load_scaled_dataset_subset, one_hot_encode  # noqa: E402
 from core.data.serialization import write_dataset, write_keys  # noqa: E402
 from core.ckks_engine import create_bootstrap_context  # noqa: E402
-from models.gradient_soft_tree.baseline.depthN_ckks import init_encrypted_params_N  # noqa: E402
+from models.gradient_soft_tree.baseline.tree_ops import init_encrypted_params_N  # noqa: E402
 
 
 def main() -> None:

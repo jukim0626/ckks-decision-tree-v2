@@ -17,8 +17,9 @@ from core.data.dataset import encrypt_dataset, load_scaled_dataset_subset, one_h
 from core.ckks_engine import create_bootstrap_context, ensure_level  # noqa: E402
 from core.encrypted_ops.slot_packing import next_power_of_two  # noqa: E402
 from core.encrypted_ops.slot_packing import extract_weight_broadcast as _extract_weight_broadcast  # noqa: E402
-from models.gradient_soft_tree.baseline.depth1_ckks import STEEPNESS, packed_softmax  # noqa: E402
-from models.gradient_soft_tree.baseline.depthN_ckks import init_encrypted_params_N  # noqa: E402
+from core.approximation.sigmoid import STEEPNESS
+from core.encrypted_ops.softmax import packed_softmax  # noqa: E402
+from models.gradient_soft_tree.baseline.tree_ops import init_encrypted_params_N  # noqa: E402
 from models.gradient_soft_tree.packed.block_ops import (  # noqa: E402
     assert_layout_fits,
     block_local_sum,
