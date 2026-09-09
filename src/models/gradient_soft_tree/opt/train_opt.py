@@ -82,7 +82,7 @@ def train(
     )
     _wait_for_gpu_settle()
     _run(
-        "models.gradient_soft_tree.setup_worker_N",
+        "models.gradient_soft_tree.baseline.setup_worker_N",
         str(session_dir), dataset_name, str(depth), str(seed), str(lr),
         str(level_preset) if level_preset is not None else "none",
     )

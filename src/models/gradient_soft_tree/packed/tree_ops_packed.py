@@ -29,7 +29,7 @@ from core.approximation.sigmoid import sigmoid_approx_enc  # noqa: E402
 from core.ckks_engine import ensure_level  # noqa: E402
 from core.encrypted_ops.slot_packing import next_power_of_two, scatter_to_slot  # noqa: E402
 from core.encrypted_ops.slot_packing import extract_weight_broadcast as _extract_weight_broadcast  # noqa: E402
-from models.gradient_soft_tree.depth1_ckks import (  # noqa: E402
+from models.gradient_soft_tree.baseline.depth1_ckks import (  # noqa: E402
     STEEPNESS,
     packed_softmax,
     softmax_backward_packed,

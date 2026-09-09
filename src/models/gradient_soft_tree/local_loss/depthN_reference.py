@@ -37,8 +37,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from core.data.dataset import load_scaled_dataset_subset, one_hot_encode  # noqa: E402
-from models.gradient_soft_tree.depth1_reference import softmax, softmax_backward  # noqa: E402
-from models.gradient_soft_tree.depthN_reference import train_depthN, predict as predict_baseline  # noqa: E402
+from models.gradient_soft_tree.baseline.depth1_reference import softmax, softmax_backward  # noqa: E402
+from models.gradient_soft_tree.baseline.depthN_reference import train_depthN, predict as predict_baseline  # noqa: E402
 
 
 def train_depthN_local_loss(

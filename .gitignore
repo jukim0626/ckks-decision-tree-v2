@@ -6,3 +6,12 @@ __pycache__/
 logs/
 results/
 src/archive/
+
+# 2026-09-09: 개인정보/연구실 내부 맥락(지도교수 성함 등)이 담긴 문서 - git에는 안 올림
+# (로컬에는 그대로 유지, Claude Code 세션 연속성용)
+/AGENTS.md
+/CLAUDE.md
+/EXPERIMENT_LOG.md
+/README.md
+/docs/
+/presentation/
