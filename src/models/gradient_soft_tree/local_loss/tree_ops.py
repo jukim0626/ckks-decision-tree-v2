@@ -34,6 +34,50 @@ def _ensure_level(ctx, ct):
     return ensure_level(ctx, ct, min_level=_LOCAL_MIN_LEVEL)
 
 
+# ---- 레벨별 loss block의 (virtual_leaf, class) 조합 reduction을 block packing으로 묶기
+# 위한 프리미티브. packed/block_ops.py의 feature-axis 기법(block_local_sum 등)과 수학적으로
+# 동일하고, 이 실험 범위(local_loss만) 밖으로 안 퍼지도록 baseline/packed는 안 건드리고
+# 여기 로컬로 재구현했다. ----
+
+
+def _block_size_for(n_samples: int) -> int:
+    return next_power_of_two(2 * n_samples)
+
+
+def _scatter_terms_to_blocks(ctx, terms: list, block_size: int):
+    """terms[b](슬롯 [0,n_samples)에 실값)를 block b(슬롯 [b*block_size,(b+1)*block_size))로
+    옮겨서 전부 더한다. block_ops.py의 `_scatter_features_to_blocks`와 동일한 회전 규약."""
+    packed = None
+    for b, term in enumerate(terms):
+        piece = term if b == 0 else ctx.engine.rotate(term, ctx.rotation_key, b * block_size)
+        packed = piece if packed is None else ctx.engine.add(packed, piece)
+    return packed
+
+
+def _block_local_sum(ctx, blocked_ct, block_size: int):
+    """block마다 로컬 합을 구한다(doubling rotate-add, block_ops.py의 `block_local_sum`과
+    동일) - 결과에서 의미 있는 값은 각 block의 시작 슬롯(b*block_size)뿐이다."""
+    cur = blocked_ct
+    s = 1
+    while s < block_size:
+        cur = ctx.engine.add(cur, ctx.engine.rotate(cur, ctx.rotation_key, -s))
+        s *= 2
+    return cur
+
+
+def _gather_block_tops(ctx, reduced_ct, n_blocks: int, block_size: int, slot_count: int):
+    """`_block_local_sum` 결과에서 각 block의 시작 슬롯 값만 뽑아 슬롯 0..n_blocks-1에
+    packing(block_ops.py의 `gather_block_tops_to_packed`와 동일)."""
+    packed = None
+    for b in range(n_blocks):
+        mask = np.zeros(slot_count)
+        mask[b * block_size] = 1.0
+        masked = ctx.engine.multiply(reduced_ct, mask)
+        piece = masked if b == 0 else ctx.engine.rotate(masked, ctx.rotation_key, -b * (block_size - 1))
+        packed = piece if packed is None else ctx.engine.add(packed, piece)
+    return packed
+
+
 def init_encrypted_params_N(ctx, n_features: int, n_classes: int, depth: int, seed: int, slot_count: int):
     """local_loss/depthN_reference.train_depthN_local_loss와 완전히 같은 순서로 rng를
     소비한다(alpha -> threshold -> local_logits[0] -> local_logits[1] -> ...)."""
@@ -144,19 +188,43 @@ def forward_backward_update_N(ctx, dataset, params: dict, sample_mask, n_feature
             diff = ctx.engine.subtract(y_hat_level[c], dataset.enc_labels[c])
             dL_dyhat_level.append(_ensure_level(ctx, ctx.engine.multiply(diff, 2.0 / n_samples)))
 
-        g_this_level = [None] * n_virtual_leaves
-        local_logits_grad = [None] * n_virtual_leaves
+        # ---- dL_ddist(이 레벨의 모든 virtual_leaf x class 조합)의 샘플-axis reduction을
+        # block packing으로 한 번에 처리한다. 원래는 조합마다 개별 ctx.engine.sum(전체
+        # slot_count=32768폭 rotate-reduction)을 불러서 조합 수만큼 bootstrap 위험 지점이
+        # 생겼는데(콜사이트 프로파일링으로 depth=2에서 이 줄이 baseline의 leaf-loss
+        # reduction보다 6회 더 많이 bootstrap을 트리거함을 확인), 이 레벨 전체를 block
+        # 하나로 묶어 reduction을 1번만 부르면 bootstrap 체크 지점이 레벨당 최대 1번으로
+        # 줄어든다(packed/block_ops.py가 feature축에 쓴 것과 동일한 기법을 virtual-leaf
+        # 축에 적용).
+        block_size = _block_size_for(n_samples)
+        n_blocks = n_virtual_leaves * n_classes
+        assert n_blocks * block_size <= ctx.engine.slot_count, (
+            f"virtual_leaf x class 조합({n_blocks}) x block_size({block_size})가 slot_count를 "
+            "초과 - 이 packing은 소규모 depth/dataset 전용"
+        )
+
+        terms = []
         for k in range(n_virtual_leaves):
-            dL_ddist_packed = None
-            g_k = None
             for c in range(n_classes):
                 term = ctx.engine.multiply(dL_dyhat_level[c], current_level_probs[k], ctx.rlk)
                 term = ctx.engine.multiply(term, sample_mask, ctx.rlk)
-                term = ctx.engine.intt(term)
-                s = _ensure_level(ctx, ctx.engine.sum(term, ctx.rotation_key))
-                piece = scatter_to_slot(ctx, s, c)
-                dL_ddist_packed = piece if dL_ddist_packed is None else ctx.engine.add(dL_ddist_packed, piece)
+                terms.append(ctx.engine.intt(term))
+        blocked = _scatter_terms_to_blocks(ctx, terms, block_size)
+        reduced = _ensure_level(ctx, _block_local_sum(ctx, blocked, block_size))
+        tops = _gather_block_tops(ctx, reduced, n_blocks, block_size, ctx.engine.slot_count)
 
+        class_mask = np.zeros(ctx.engine.slot_count)
+        class_mask[:n_classes] = 1.0
+
+        g_this_level = [None] * n_virtual_leaves
+        local_logits_grad = [None] * n_virtual_leaves
+        for k in range(n_virtual_leaves):
+            shift = k * n_classes
+            window = tops if shift == 0 else ctx.engine.rotate(tops, ctx.rotation_key, -shift)
+            dL_ddist_packed = ctx.engine.multiply(window, class_mask)
+
+            g_k = None
+            for c in range(n_classes):
                 ld_c = extract_weight_broadcast(ctx, local_dist[k], c)
                 g_piece = ctx.engine.multiply(dL_dyhat_level[c], ld_c, ctx.rlk)
                 g_k = g_piece if g_k is None else ctx.engine.add(g_k, g_piece)
