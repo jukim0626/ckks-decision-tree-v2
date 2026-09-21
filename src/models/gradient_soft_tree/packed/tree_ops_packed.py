@@ -48,6 +48,83 @@ def _ensure_level(ctx, ct):
     return ensure_level(ctx, ct, min_level=_LOCAL_MIN_LEVEL)
 
 
+# ---- 학습(forward_backward_update_N_packed)과 추론(predict_packed)이 공유하는 순수 forward
+# 조각. 2026-09-21 리팩터: 이전엔 predict_packed()가 forward_backward_update_N_packed()의
+# forward 절반을 그대로 복붙한 코드였다(주석에 "공유 헬퍼로 뽑으면 이미 검증된 학습 경로를
+# 건드릴 위험이 있어 복제 후 최소 변경 원칙을 따름"이라고 적혀 있었지만, 지금 다시 보니
+# CKKS 연산 순서를 전혀 안 바꾸는 추출이라 위험이 없었다). 아래 3개 함수는 CKKS 연산을
+# 하나도 추가/삭제/재배열하지 않고 기존 두 함수의 코드를 그대로 옮긴 것뿐이다.
+#
+# **캐싱은 호출부 책임**: 이 함수들 자체는 backward에 필요한 중간값(gate_blocked, w 등)을
+# 어디에도 저장하지 않고 그냥 반환만 한다 - forward_backward_update_N_packed는 그 반환값을
+# 자기 리스트(node_gate 등)에 저장해서 오래 들고 있고, predict_packed는 그 값을 즉시 쓰고
+# 버린다(참조를 안 만드니 GPU 메모리 수명도 원래 predict_packed 그대로 - 공유 함수 안에서
+# 무조건 캐시를 만들면 추론 쪽 ciphertext 수명이 늘어나 peak memory에 영향을 줄 수 있어서
+# 일부러 안 함)."""
+
+
+def _node_gate_packed(ctx, alpha_i, threshold_i: list, blocked_features, block_masks: list, block_size: int, sample_mask, n_features: int, n_pow2_f: int):
+    """한 internal node의 (gate, gate_blocked, w)를 계산 - packed 학습/추론이 공유하는
+    유일한 CKKS 연산 순서(원본 forward_backward_update_N_packed의 158~182행, predict_packed의
+    81~94행과 완전히 동일).
+
+    **`extract_block_to_full`의 sample_mask 곱셈이 baseline과 달리 필수인 이유**:
+    baseline의 gate_j는 회전 없는 단일 feature ciphertext라 n_samples 밖은 원래부터
+    (encrypt 시점부터) 0으로 깨끗하다. 반면 packed gate_j는 gate_blocked(폭
+    n_features*block_size 밖은 sigmoid(0)=0.5, 그 안도 다른 feature block의 회전-랩어라운드
+    잔재가 섞일 수 있음)를 **회전**해서 얻으므로 애초에 안 깨끗하다 - 여기서 sample_mask로
+    명시적으로 지우지 않으면 gate(및 이걸로 backward에서 만드는 gate_broadcast_blocked)가
+    n_samples 밖에서 오염된 채로 전파된다(2026-09 디버깅에서 실측: 마스킹을 빼면
+    alpha/threshold가 baseline과 1 epoch만에 이미 0.003~0.009 어긋남 - leaf_logits는 이
+    마스킹과 무관한 코드라 정상이었음)."""
+    w = packed_softmax(ctx, alpha_i, n_features, n_pow2_f)
+
+    blocked_threshold_i = pack_threshold_blocked(ctx, threshold_i, block_masks)
+    enc_diff_blocked = ctx.engine.subtract(blocked_features, blocked_threshold_i)
+    enc_diff_blocked = ensure_level(ctx, enc_diff_blocked, min_level=12)
+    gate_blocked = sigmoid_approx_enc(ctx.engine, ctx.rlk, enc_diff_blocked)
+
+    gate = None
+    for j in range(n_features):
+        gate_j = extract_block_to_full(ctx, gate_blocked, j, block_size, sample_mask)
+        w_j = _extract_weight_broadcast(ctx, w, j)
+        piece = ctx.engine.multiply(w_j, gate_j, ctx.rlk)
+        gate = piece if gate is None else ctx.engine.add(gate, piece)
+    gate = _ensure_level(ctx, gate)
+    return gate, gate_blocked, w
+
+
+def _propagate_reach_prob(ctx, gate, parent_prob):
+    """부모의 reach probability에 gate를 곱해 자식(left/right)의 reach probability를
+    만든다 - root(parent_prob=None)는 암묵적으로 1."""
+    if parent_prob is None:
+        left = ctx.engine.subtract(1.0, gate)
+        right = gate
+    else:
+        parent_prob = _ensure_level(ctx, parent_prob)
+        left = ctx.engine.multiply(parent_prob, ctx.engine.subtract(1.0, gate), ctx.rlk)
+        right = ctx.engine.multiply(parent_prob, gate, ctx.rlk)
+    return _ensure_level(ctx, left), _ensure_level(ctx, right)
+
+
+def _leaf_class_scores(ctx, leaf_logits: list, leaf_probs: list, n_classes: int, n_pow2_c: int, n_leaves: int):
+    """leaf_logits(softmax로 leaf distribution)와 leaf_probs(reach probability)로 클래스별
+    encrypted score(y_hat)를 계산 - packed 학습/추론이 공유. `leafdist`도 함께 반환한다 -
+    training은 이 값을 leaf backward(softmax_backward_packed)에 다시 쓰고, predict_packed은
+    반환받은 걸 그냥 버린다(저장 안 하니 predict 쪽 ciphertext 수명은 원래 코드와 동일)."""
+    leafdist = [packed_softmax(ctx, leaf_logits[l], n_classes, n_pow2_c) for l in range(n_leaves)]
+
+    y_hat = []
+    for c in range(n_classes):
+        acc = None
+        for l in range(n_leaves):
+            ld_c = _ensure_level(ctx, _extract_weight_broadcast(ctx, leafdist[l], c))
+            term = ctx.engine.multiply(leaf_probs[l], ld_c, ctx.rlk)
+            acc = term if acc is None else ctx.engine.add(acc, term)
+        y_hat.append(_ensure_level(ctx, acc))
+    return y_hat, leafdist
+
+
 def predict_packed(
     ctx,
     dataset,
@@ -61,15 +138,16 @@ def predict_packed(
     depth: int,
 ):
     """학습된(암호화 상태 그대로인) params로 `dataset`(보통 test set)에 대해 **forward만**
-    실행해서 클래스별 encrypted score(y_hat)를 계산한다 - `forward_backward_update_N_packed`의
-    forward 절반(leaf 계산까지)만 떼어낸 것으로, 코드를 그대로 복붙했다(공유 헬퍼로 뽑으면
-    이미 검증된 학습 경로를 건드릴 위험이 있어 이 파일의 다른 곳처럼 "복제 후 최소satisfying
-    변경" 원칙을 따름). params(alpha/threshold/leaf_logits)는 절대 decrypt하지 않는다 -
-    유일한 decrypt 지점은 이 함수가 반환하는 y_hat뿐이다(client_assisted/inference.py
-    모듈 docstring의 "client가 아는 유일한 예외적 decrypt 지점" 원칙과 동일)."""
+    실행해서 클래스별 encrypted score(y_hat)를 계산한다. `_node_gate_packed`/
+    `_propagate_reach_prob`/`_leaf_class_scores`(이 파일 상단)를
+    `forward_backward_update_N_packed`와 공유하되, backward용 캐시(node_gate 등)는 만들지
+    않는다 - gate_blocked/w는 이 루프 안에서만 잠깐 쓰이고 다음 반복에서 버려진다(원래
+    코드와 동일한 수명, 리팩터로 GPU 메모리 보유 기간이 늘어나지 않음). params(alpha/
+    threshold/leaf_logits)는 절대 decrypt하지 않는다 - 유일한 decrypt 지점은 이 함수가
+    반환하는 y_hat뿐이다(client_assisted/inference.py 모듈 docstring의 "client가 아는
+    유일한 예외적 decrypt 지점" 원칙과 동일)."""
     n_pow2_f = next_power_of_two(n_features)
     n_pow2_c = next_power_of_two(n_classes)
-    n_internal = (1 << depth) - 1
     n_leaves = 1 << depth
 
     current_level_probs = [None]
@@ -78,45 +156,19 @@ def predict_packed(
         next_level_probs = []
         for parent_prob in current_level_probs:
             i = node_idx
-            w = packed_softmax(ctx, params["alpha"][i], n_features, n_pow2_f)
-
-            blocked_threshold_i = pack_threshold_blocked(ctx, params["threshold"][i], block_masks)
-            enc_diff_blocked = ctx.engine.subtract(blocked_features, blocked_threshold_i)
-            enc_diff_blocked = ensure_level(ctx, enc_diff_blocked, min_level=12)
-            gate_blocked = sigmoid_approx_enc(ctx.engine, ctx.rlk, enc_diff_blocked)
-
-            gate = None
-            for j in range(n_features):
-                gate_j = extract_block_to_full(ctx, gate_blocked, j, block_size, sample_mask)
-                w_j = _extract_weight_broadcast(ctx, w, j)
-                piece = ctx.engine.multiply(w_j, gate_j, ctx.rlk)
-                gate = piece if gate is None else ctx.engine.add(gate, piece)
-            gate = _ensure_level(ctx, gate)
-
-            if parent_prob is None:
-                left = ctx.engine.subtract(1.0, gate)
-                right = gate
-            else:
-                parent_prob = _ensure_level(ctx, parent_prob)
-                left = ctx.engine.multiply(parent_prob, ctx.engine.subtract(1.0, gate), ctx.rlk)
-                right = ctx.engine.multiply(parent_prob, gate, ctx.rlk)
-            next_level_probs.append(_ensure_level(ctx, left))
-            next_level_probs.append(_ensure_level(ctx, right))
+            gate, _gate_blocked, _w = _node_gate_packed(
+                ctx, params["alpha"][i], params["threshold"][i], blocked_features,
+                block_masks, block_size, sample_mask, n_features, n_pow2_f,
+            )
+            left, right = _propagate_reach_prob(ctx, gate, parent_prob)
+            next_level_probs.append(left)
+            next_level_probs.append(right)
             node_idx += 1
             gc.collect()
         current_level_probs = next_level_probs
     leaf_probs = current_level_probs
 
-    leafdist = [packed_softmax(ctx, params["leaf_logits"][l], n_classes, n_pow2_c) for l in range(n_leaves)]
-
-    y_hat = []
-    for c in range(n_classes):
-        acc = None
-        for l in range(n_leaves):
-            ld_c = _ensure_level(ctx, _extract_weight_broadcast(ctx, leafdist[l], c))
-            term = ctx.engine.multiply(leaf_probs[l], ld_c, ctx.rlk)
-            acc = term if acc is None else ctx.engine.add(acc, term)
-        y_hat.append(_ensure_level(ctx, acc))
+    y_hat, _leafdist = _leaf_class_scores(ctx, params["leaf_logits"], leaf_probs, n_classes, n_pow2_c, n_leaves)
     return y_hat
 
 
@@ -155,59 +207,29 @@ def forward_backward_update_N_packed(
         next_level_probs = []
         for parent_prob in current_level_probs:
             i = node_idx
-            w = packed_softmax(ctx, params["alpha"][i], n_features, n_pow2_f)
-
-            # --- 이 5줄이 baseline의 `for j in range(n_features): ...` 루프(n_features번의
-            # sigmoid_approx_enc 호출, 각각 bootstrap 유발)를 대체한다 ---
-            blocked_threshold_i = pack_threshold_blocked(ctx, params["threshold"][i], block_masks)
-            enc_diff_blocked = ctx.engine.subtract(blocked_features, blocked_threshold_i)
-            enc_diff_blocked = ensure_level(ctx, enc_diff_blocked, min_level=12)  # baseline과 동일 guard(depthN_ckks.py 주석 참고)
-            gate_blocked = sigmoid_approx_enc(ctx.engine, ctx.rlk, enc_diff_blocked)
-
-            gate = None
-            for j in range(n_features):  # 여기부턴 rotation+mask만(bootstrap 없음)
-                # **마스킹이 baseline과 달라도 필요한 이유**: baseline의 gate_j는 회전 없는
-                # 단일 feature ciphertext라 n_samples 밖은 원래부터(encrypt 시점부터) 0으로
-                # 깨끗하다. 반면 packed gate_j는 gate_blocked(폭 n_features*block_size 밖은
-                # sigmoid(0)=0.5, 그 안도 다른 feature block의 회전-랩어라운드 잔재가 섞일 수
-                # 있음)를 "회전"해서 얻으므로 애초에 안 깨끗하다 - 여기서 sample_mask로
-                # 명시적으로 지우지 않으면 gate(및 이걸로 만드는 gate_broadcast_blocked)가
-                # n_samples 밖에서 오염된 채로 backward까지 전파된다(2026-09 디버깅에서
-                # 실측: 마스킹을 빼면 alpha/threshold가 baseline과 1 epoch만에 이미
-                # 0.003~0.009 어긋남 - leaf_logits는 이 마스킹과 무관한 코드라 정상이었음).
-                gate_j = extract_block_to_full(ctx, gate_blocked, j, block_size, sample_mask)
-                w_j = _extract_weight_broadcast(ctx, w, j)
-                piece = ctx.engine.multiply(w_j, gate_j, ctx.rlk)
-                gate = piece if gate is None else ctx.engine.add(gate, piece)
-            gate = _ensure_level(ctx, gate)
-
+            # --- predict_packed()과 공유하는 forward 조각(이 파일 상단 _node_gate_packed) -
+            # baseline의 `for j in range(n_features): sigmoid_approx_enc(...)` 루프
+            # (n_features번의 bootstrap 유발 호출)를 block 레이아웃 1번 호출로 대체하는 부분.
+            # 여기서만 backward용으로 gate_blocked/w를 node_gate_blocked/node_w에 저장해서
+            # 오래 들고 있는다(predict_packed은 이 저장을 안 해서 참조가 훨씬 짧게 산다).
+            gate, gate_blocked, w = _node_gate_packed(
+                ctx, params["alpha"][i], params["threshold"][i], blocked_features,
+                block_masks, block_size, sample_mask, n_features, n_pow2_f,
+            )
             node_gate[i], node_gate_blocked[i], node_w[i], node_parent_prob[i] = gate, gate_blocked, w, parent_prob
 
-            if parent_prob is None:
-                left = ctx.engine.subtract(1.0, gate)
-                right = gate
-            else:
-                parent_prob = _ensure_level(ctx, parent_prob)
-                left = ctx.engine.multiply(parent_prob, ctx.engine.subtract(1.0, gate), ctx.rlk)
-                right = ctx.engine.multiply(parent_prob, gate, ctx.rlk)
-            next_level_probs.append(_ensure_level(ctx, left))
-            next_level_probs.append(_ensure_level(ctx, right))
+            left, right = _propagate_reach_prob(ctx, gate, parent_prob)
+            next_level_probs.append(left)
+            next_level_probs.append(right)
             node_idx += 1
             gc.collect()
         current_level_probs = next_level_probs
     leaf_probs = current_level_probs
 
-    # --- leaf 계산/backward는 feature 축과 무관 - baseline과 완전히 동일 ---
-    leafdist = [packed_softmax(ctx, params["leaf_logits"][l], n_classes, n_pow2_c) for l in range(n_leaves)]
-
-    y_hat = []
-    for c in range(n_classes):
-        acc = None
-        for l in range(n_leaves):
-            ld_c = _ensure_level(ctx, _extract_weight_broadcast(ctx, leafdist[l], c))
-            term = ctx.engine.multiply(leaf_probs[l], ld_c, ctx.rlk)
-            acc = term if acc is None else ctx.engine.add(acc, term)
-        y_hat.append(_ensure_level(ctx, acc))
+    # --- leaf 계산: predict_packed()과 공유(이 파일 상단 _leaf_class_scores). leafdist는
+    # 아래 backward(softmax_backward_packed)에서 다시 쓰이므로 여기서는 버리지 않는다.
+    # backward 자체는 feature 축과 무관 - baseline과 완전히 동일 ---
+    y_hat, leafdist = _leaf_class_scores(ctx, params["leaf_logits"], leaf_probs, n_classes, n_pow2_c, n_leaves)
 
     n_samples = dataset.n_samples
     dL_dyhat = []
