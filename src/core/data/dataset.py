@@ -28,12 +28,34 @@ def _load_pima_diabetes():
     return SimpleNamespace(data=raw.data, target=target, target_names=target_names)
 
 
+def _load_soybean():
+    """OpenML data_id=1023(soybean, binary N/P 축소판, 683 samples/35 categorical feature).
+    35개 feature 전부 순서 없는 범주형 문자열(예: precip=gt-norm/norm/lt-norm)이다.
+
+    2026-09-16: 처음엔 one-hot(35->99 feature)으로 풀었으나, depth=3(internal node 7개)
+    기준 alpha/threshold 파라미터 ciphertext가 693개씩(총 1386개)로 늘어나
+    breast_cancer depth=5(930개, setup 단계 즉사)보다도 많아져서 packed baseline으로도
+    CUDA OOM(첫 노드의 attention softmax bootstrap에서 즉사) - packing은 파라미터
+    *저장* 개수를 줄이는 게 아니라 샘플축 연산 *횟수*만 줄이는 거라 이 문제엔 무력함.
+    사용자와 논의 후 **정수 라벨 인코딩**(카테고리를 pd.Categorical codes로 0,1,2...에
+    매핑, feature 수는 35 그대로 유지)으로 전환 - 파라미터가 693*2/3=245개씩(35*7)으로
+    줄어 OOM 위험이 낮아지는 대신, 카테고리 사이에 없던 순서/거리 관계를 sigmoid
+    threshold가 학습 과정에서 임의로 부여하게 되는 트레이드오프를 감수한 것."""
+    raw = fetch_openml(data_id=1023, as_frame=True)
+    X = np.column_stack([raw.data[col].cat.codes.to_numpy(dtype=float) for col in raw.data.columns])
+    target_names = sorted(set(raw.target))  # ['N', 'P']
+    name_to_idx = {name: idx for idx, name in enumerate(target_names)}
+    target = np.array([name_to_idx[label] for label in raw.target], dtype=int)
+    return SimpleNamespace(data=X, target=target, target_names=target_names)
+
+
 _DATASET_LOADERS = {
     "iris": load_iris,
     "wine": load_wine,
     "breast_cancer": load_breast_cancer,
     "digits": load_digits,
     "diabetes": _load_pima_diabetes,
+    "soybean": _load_soybean,
 }
 
 
@@ -77,11 +99,13 @@ def encrypt_dataset(ctx: Any, X: np.ndarray, y_one_hot: np.ndarray) -> Encrypted
 
 def load_scaled_dataset_subset(
     dataset_name: str = "iris",
-    test_size: int = 30,
+    test_size: float | int = 0.2,
     max_train: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str]]:
-    """지정한 sklearn dataset에서 test_size(절대 개수)만 test로 떼어내고 나머지 전체를
-    train으로 쓴다 (train 기준 minmax_minus1_1 scaling).
+    """지정한 sklearn dataset을 train/test로 나눠서 쓴다 (train 기준 minmax_minus1_1
+    scaling). test_size는 sklearn train_test_split 그대로: 0<x<1이면 비율(기본 0.2 ->
+    80/20 split), 정수면 절대 개수(과거 기본값이었던 고정 30개 방식 - 데이터셋마다 train
+    비율이 들쭉날쭉해지는 문제가 있어 비율 기본값으로 전환함).
 
     max_train을 주면 train을 그 개수로 stratified subsample한다."""
     if dataset_name not in _DATASET_LOADERS:

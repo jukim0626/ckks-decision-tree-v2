@@ -30,8 +30,13 @@ def main() -> None:
     lr = float(sys.argv[5])
     level_preset = int(sys.argv[6]) if len(sys.argv) > 6 and sys.argv[6] != "none" else None
     max_train = int(sys.argv[7]) if len(sys.argv) > 7 and sys.argv[7] != "none" else None
+    # test_size: 소수(0<x<1)면 비율(기본 0.2 -> 80/20 split), 정수면 절대 개수(과거 고정 30개 방식)
+    test_size_arg = sys.argv[8] if len(sys.argv) > 8 and sys.argv[8] != "none" else "0.2"
+    test_size = float(test_size_arg) if "." in test_size_arg else int(test_size_arg)
 
-    X_train, X_test, y_train, y_test, _ = load_scaled_dataset_subset(dataset_name, max_train=max_train)
+    X_train, X_test, y_train, y_test, _ = load_scaled_dataset_subset(
+        dataset_name, test_size=test_size, max_train=max_train
+    )
     n_features = X_train.shape[1]
     n_classes = int(max(y_train.max(), y_test.max()) + 1)
     y_train_oh = one_hot_encode(y_train, n_classes)
@@ -69,6 +74,7 @@ def main() -> None:
         "seed": seed,
         "max_train": max_train,
         "level_preset": level_preset,
+        "test_size": test_size,
     }
     (session_dir / "config.json").write_text(json.dumps(config))
 

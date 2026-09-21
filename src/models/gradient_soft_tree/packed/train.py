@@ -5,7 +5,9 @@ setup/finalize는 baseline 그대로 재사용(`setup_worker_N`/`finalize_worker
 params[] 포맷을 안 바꾸므로 그대로 호환된다.
 
 사용법: python -m models.gradient_soft_tree.packed.train wine 3 10 2.0 0 17
-        (dataset, depth, epochs, lr, seed, level_preset)
+        (dataset, depth, epochs, lr, seed, level_preset, [max_train], [test_size])
+        test_size 기본값 0.2(80/20 split, load_scaled_dataset_subset 기본값과 동일) - 과거
+        고정 30개 방식이 데이터셋마다 train 비율이 들쭉날쭉해서 비율 기본값으로 전환함.
 """
 
 from __future__ import annotations
@@ -59,12 +61,13 @@ def train(
     seed: int,
     level_preset: int | None = 17,
     max_train: int | None = None,
+    test_size: float | int = 0.2,
 ) -> dict:
     session_dir = Path(tempfile.mkdtemp(prefix=f"packed_gradient_soft_tree_depth{depth}_"))
 
     print(
         f"[setup] dataset={dataset_name} depth={depth} epochs={n_epochs} lr={lr} seed={seed} "
-        f"level_preset={level_preset} max_train={max_train}",
+        f"level_preset={level_preset} max_train={max_train} test_size={test_size}",
         flush=True,
     )
     _wait_for_gpu_settle()
@@ -73,6 +76,7 @@ def train(
         str(session_dir), dataset_name, str(depth), str(seed), str(lr),
         str(level_preset) if level_preset is not None else "none",
         str(max_train) if max_train is not None else "none",
+        str(test_size),
     )
 
     for epoch in range(1, n_epochs + 1):
@@ -123,7 +127,9 @@ def main() -> None:
     level_preset = None if level_preset_arg == "none" else int(level_preset_arg)
     max_train_arg = sys.argv[7] if len(sys.argv) > 7 else "none"
     max_train = None if max_train_arg == "none" else int(max_train_arg)
-    train(dataset_name, depth, n_epochs, lr, seed, level_preset=level_preset, max_train=max_train)
+    test_size_arg = sys.argv[8] if len(sys.argv) > 8 else "0.2"
+    test_size = float(test_size_arg) if "." in test_size_arg else int(test_size_arg)
+    train(dataset_name, depth, n_epochs, lr, seed, level_preset=level_preset, max_train=max_train, test_size=test_size)
 
 
 if __name__ == "__main__":

@@ -49,7 +49,7 @@ def main() -> None:
     decoded = decrypt_params_N(ctx, final_params, n_features, n_classes, depth)
 
     X_train, X_test, y_train, y_test, _ = load_scaled_dataset_subset(
-        dataset_name, max_train=config.get("max_train")
+        dataset_name, test_size=config.get("test_size", 0.2), max_train=config.get("max_train")
     )
     ref_final = train_depthN(X_train, np.eye(n_classes)[y_train], depth=depth, lr=lr, epochs=n_epochs, seed=seed)
     max_err = max(
