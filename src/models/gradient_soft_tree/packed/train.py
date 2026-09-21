@@ -13,44 +13,17 @@ params[] 포맷을 안 바꾸므로 그대로 호환된다.
 from __future__ import annotations
 
 import json
-import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+from core.runtime.gpu import wait_for_gpu_settle  # noqa: E402
+from core.runtime.session import make_session_dir, run_worker_with_oom_retry  # noqa: E402
+from core.runtime.subprocess_worker import run_worker_module  # noqa: E402
+
 _MAX_OOM_RETRIES = 3
-
-
-def _gpu_memory_used_mib() -> int:
-    out = subprocess.run(
-        ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
-        capture_output=True, text=True,
-    ).stdout.strip().splitlines()
-    return int(out[0]) if out else 0
-
-
-def _wait_for_gpu_settle(threshold_mib: int = 500, timeout_s: float = 60.0, poll_s: float = 1.0) -> None:
-    t0 = time.time()
-    while time.time() - t0 < timeout_s:
-        if _gpu_memory_used_mib() < threshold_mib:
-            return
-        time.sleep(poll_s)
-
-
-def _run(module: str, *args: str) -> str:
-    result = subprocess.run(
-        [sys.executable, "-m", module, *args],
-        capture_output=True,
-        text=True,
-        cwd=str(REPO_ROOT),
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"{module} 실패:\n--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}")
-    return result.stdout
 
 
 def train(
@@ -63,15 +36,15 @@ def train(
     max_train: int | None = None,
     test_size: float | int = 0.2,
 ) -> dict:
-    session_dir = Path(tempfile.mkdtemp(prefix=f"packed_gradient_soft_tree_depth{depth}_"))
+    session_dir = make_session_dir(f"packed_gradient_soft_tree_depth{depth}_")
 
     print(
         f"[setup] dataset={dataset_name} depth={depth} epochs={n_epochs} lr={lr} seed={seed} "
         f"level_preset={level_preset} max_train={max_train} test_size={test_size}",
         flush=True,
     )
-    _wait_for_gpu_settle()
-    _run(
+    wait_for_gpu_settle()
+    run_worker_module(
         "models.gradient_soft_tree.baseline.setup_worker",  # baseline 그대로 재사용
         str(session_dir), dataset_name, str(depth), str(seed), str(lr),
         str(level_preset) if level_preset is not None else "none",
@@ -81,32 +54,21 @@ def train(
 
     for epoch in range(1, n_epochs + 1):
         t0 = time.time()
-        for attempt in range(1, _MAX_OOM_RETRIES + 2):
-            _wait_for_gpu_settle()
-            try:
-                _run("models.gradient_soft_tree.packed.epoch_worker_packed", str(session_dir))
-                break
-            except RuntimeError as exc:
-                if "out of memory" not in str(exc) or attempt > _MAX_OOM_RETRIES:
-                    raise
-                # epoch_worker_packed는 params를 다 계산한 뒤에만 디스크에 쓰므로(중간에 안 씀),
-                # OOM으로 죽어도 params는 직전 epoch 상태 그대로 남아있어 재시도가 안전하다.
-                # breast_cancer(30 feature, 다른 데이터셋보다 ciphertext가 훨씬 많음)에서
-                # 처음 발견된 문제 - GPU 메모리 회수가 이전 프로세스 종료 후 즉시가 아니라
-                # 지연될 때가 있어(_wait_for_gpu_settle이 500MiB 아래로 못 내려간 채 60s
-                # 타임아웃으로 그냥 진행), 다음 프로세스가 메모리 부족으로 죽는 경우가 있다.
-                wait_s = 30.0 * attempt
-                print(
-                    f"[packed {dataset_name} depth={depth}] epoch {epoch} OOM (attempt {attempt}/"
-                    f"{_MAX_OOM_RETRIES}) - {wait_s:.0f}초 대기 후 재시도",
-                    flush=True,
-                )
-                time.sleep(wait_s)
+        # epoch_worker_packed는 params를 다 계산한 뒤에만 디스크에 쓰므로(중간에 안 씀),
+        # OOM으로 죽어도 params는 직전 epoch 상태 그대로 남아있어 재시도가 안전하다.
+        # breast_cancer(30 feature, 다른 데이터셋보다 ciphertext가 훨씬 많음)에서 처음
+        # 발견된 문제 - GPU 메모리 회수가 이전 프로세스 종료 후 즉시가 아니라 지연될 때가
+        # 있어(wait_for_gpu_settle이 500MiB 아래로 못 내려간 채 60s 타임아웃으로 그냥
+        # 진행), 다음 프로세스가 메모리 부족으로 죽는 경우가 있다.
+        run_worker_with_oom_retry(
+            lambda: run_worker_module("models.gradient_soft_tree.packed.epoch_worker_packed", str(session_dir)),
+            epoch=epoch, log_prefix=f"[packed {dataset_name} depth={depth}]", max_retries=_MAX_OOM_RETRIES,
+        )
         elapsed = time.time() - t0
         print(f"[packed {dataset_name} depth={depth}] epoch {epoch}/{n_epochs} done | {elapsed:.1f}s", flush=True)
 
-    _wait_for_gpu_settle()
-    stdout = _run("models.gradient_soft_tree.baseline.finalize_worker", str(session_dir), str(n_epochs))  # baseline 그대로 재사용
+    wait_for_gpu_settle()
+    stdout = run_worker_module("models.gradient_soft_tree.baseline.finalize_worker", str(session_dir), str(n_epochs))  # baseline 그대로 재사용
     result = json.loads(stdout.strip().splitlines()[-1])
     print(
         f"[packed {dataset_name} depth={depth}] max abs diff vs plaintext = {result['max_err']:.5f} | "

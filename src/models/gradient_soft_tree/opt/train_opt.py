@@ -11,61 +11,15 @@ from __future__ import annotations
 
 import dataclasses
 import json
-import subprocess
 import sys
-import tempfile
-import threading
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from core.runtime.gpu import GpuPeakWatcher, wait_for_gpu_settle  # noqa: E402
+from core.runtime.session import make_session_dir  # noqa: E402
+from core.runtime.subprocess_worker import REPO_ROOT, run_worker_module  # noqa: E402
 from models.gradient_soft_tree.opt.experiments_registry import get_preset  # noqa: E402
-
-REPO_ROOT = Path(__file__).resolve().parents[3]
-
-
-def _gpu_memory_used_mib() -> int:
-    out = subprocess.run(
-        ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
-        capture_output=True, text=True,
-    ).stdout.strip().splitlines()
-    return int(out[0]) if out else 0
-
-
-def _wait_for_gpu_settle(threshold_mib: int = 500, timeout_s: float = 60.0, poll_s: float = 1.0) -> None:
-    t0 = time.time()
-    while time.time() - t0 < timeout_s:
-        if _gpu_memory_used_mib() < threshold_mib:
-            return
-        time.sleep(poll_s)
-
-
-def _run(module: str, *args: str) -> str:
-    result = subprocess.run([sys.executable, "-m", module, *args], capture_output=True, text=True, cwd=str(REPO_ROOT))
-    if result.returncode != 0:
-        raise RuntimeError(f"{module} 실패:\n--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}")
-    return result.stdout
-
-
-class _GpuPeakWatcher:
-    def __init__(self, poll_s: float = 1.0):
-        self.poll_s = poll_s
-        self.peak = 0
-        self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._loop, daemon=True)
-
-    def _loop(self):
-        while not self._stop.is_set():
-            self.peak = max(self.peak, _gpu_memory_used_mib())
-            time.sleep(self.poll_s)
-
-    def __enter__(self):
-        self._thread.start()
-        return self
-
-    def __exit__(self, *exc):
-        self._stop.set()
-        self._thread.join(timeout=5)
 
 
 def train(
@@ -73,15 +27,15 @@ def train(
     level_preset: int | None = 17, detailed: bool = False,
 ) -> dict:
     tree_config = get_preset(preset_name)
-    session_dir = Path(tempfile.mkdtemp(prefix=f"opt_{preset_name}_depth{depth}_"))
+    session_dir = make_session_dir(f"opt_{preset_name}_depth{depth}_")
 
     print(
         f"[setup] preset={preset_name} dataset={dataset_name} depth={depth} epochs={n_epochs} lr={lr} "
         f"seed={seed} level_preset={level_preset}",
         flush=True,
     )
-    _wait_for_gpu_settle()
-    _run(
+    wait_for_gpu_settle()
+    run_worker_module(
         "models.gradient_soft_tree.baseline.setup_worker",
         str(session_dir), dataset_name, str(depth), str(seed), str(lr),
         str(level_preset) if level_preset is not None else "none",
@@ -91,11 +45,11 @@ def train(
     epoch_results = []
     peak_mib = 0
     for epoch in range(1, n_epochs + 1):
-        _wait_for_gpu_settle()
+        wait_for_gpu_settle()
         t0 = time.time()
-        with _GpuPeakWatcher() as watcher:
+        with GpuPeakWatcher() as watcher:
             args = [str(session_dir)] + (["detailed"] if detailed else [])
-            stdout = _run("models.gradient_soft_tree.opt.epoch_worker_opt", *args)
+            stdout = run_worker_module("models.gradient_soft_tree.opt.epoch_worker_opt", *args)
         peak_mib = max(peak_mib, watcher.peak)
         elapsed = time.time() - t0
         lines = stdout.strip().splitlines()
@@ -109,8 +63,8 @@ def train(
             flush=True,
         )
 
-    _wait_for_gpu_settle()
-    stdout = _run("models.gradient_soft_tree.opt.finalize_worker_opt", str(session_dir), str(n_epochs))
+    wait_for_gpu_settle()
+    stdout = run_worker_module("models.gradient_soft_tree.opt.finalize_worker_opt", str(session_dir), str(n_epochs))
     result = json.loads(stdout.strip().splitlines()[-1])
     result["preset"] = preset_name
     result["epoch_results"] = epoch_results
