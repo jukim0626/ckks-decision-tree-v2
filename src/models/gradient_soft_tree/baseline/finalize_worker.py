@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-from core.data.dataset import load_scaled_dataset_subset  # noqa: E402
+from core.data.dataset import load_scaler, resolve_leaf_family_test_size, split_dataset_subset  # noqa: E402
 from core.data.serialization import load_context  # noqa: E402
 from core.ckks_engine import create_bootstrap_engine  # noqa: E402
 from models.gradient_soft_tree.baseline.tree_ops import decrypt_params_N  # noqa: E402
@@ -46,9 +46,19 @@ def main() -> None:
     }
     decoded = decrypt_params_N(ctx, final_params, n_features, n_classes, depth)
 
-    X_train, X_test, y_train, y_test, _ = load_scaled_dataset_subset(
-        dataset_name, test_size=config.get("test_size", 0.2), max_train=config.get("max_train")
+    # 2026-09-21: 학습 때와 같은 test_size/max_train으로 raw split을 재현하고(구세션도
+    # resolve_leaf_family_test_size가 그 시점 실제 기본값을 적용), 학습 때 저장해둔
+    # scaler로 transform만 한다(재적합 없음) - finalize가 자기만의 scaler를 새로 fit해서
+    # 학습 때와 다른 스케일링으로 평가하는 사고를 막는다.
+    test_size = resolve_leaf_family_test_size(config)
+    X_train_raw, X_test_raw, y_train, y_test, _ = split_dataset_subset(
+        dataset_name, test_size=test_size, max_train=config.get("max_train")
     )
+    scaler = load_scaler(
+        session_dir / "client" / "scaler.json", expected_dataset_name=dataset_name, expected_n_features=n_features
+    )
+    X_train = scaler.transform(X_train_raw)
+    X_test = scaler.transform(X_test_raw)
     ref_final = train_depthN(X_train, np.eye(n_classes)[y_train], depth=depth, lr=lr, epochs=n_epochs, seed=seed)
     max_err = max(
         np.abs(decoded["alpha"] - ref_final["alpha"]).max(),

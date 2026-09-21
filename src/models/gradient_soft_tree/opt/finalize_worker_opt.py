@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-from core.data.dataset import load_scaled_dataset_subset  # noqa: E402
+from core.data.dataset import load_scaler, resolve_leaf_family_test_size, split_dataset_subset  # noqa: E402
 from core.data.serialization import load_context  # noqa: E402
 from core.ckks_engine import create_bootstrap_engine  # noqa: E402
 from models.gradient_soft_tree.baseline.tree_ops import decrypt_params_N  # noqa: E402
@@ -50,7 +50,20 @@ def main() -> None:
     decoded = decrypt_params_N(ctx, final_params, n_features, n_classes, depth)
     decoded["config"] = tree_config
 
-    X_train, X_test, y_train, y_test, _ = load_scaled_dataset_subset(dataset_name)
+    # 2026-09-21: opt는 baseline/setup_worker.py를 그대로 재사용하므로 config 스키마도
+    # baseline과 같다(leaf_logits 계열) - test_size/scaler를 안 넘겨서 학습 때와 다른
+    # preprocessing으로 평가할 위험을 baseline/finalize_worker.py와 동일하게 없앤다.
+    # (현재 opt/train_opt.py는 setup_worker를 항상 기본값으로만 부르므로 지금 당장
+    # 재현되는 활성 버그는 아니지만, 구조는 baseline/packed와 동일한 잠재 버그였다.)
+    test_size = resolve_leaf_family_test_size(config)
+    X_train_raw, X_test_raw, y_train, y_test, _ = split_dataset_subset(
+        dataset_name, test_size=test_size, max_train=config.get("max_train")
+    )
+    scaler = load_scaler(
+        session_dir / "client" / "scaler.json", expected_dataset_name=dataset_name, expected_n_features=n_features
+    )
+    X_train = scaler.transform(X_train_raw)
+    X_test = scaler.transform(X_test_raw)
     ref_final = train_depthN_variant(
         X_train, np.eye(n_classes)[y_train], depth=depth, config=tree_config, lr=lr, epochs=n_epochs, seed=seed
     )

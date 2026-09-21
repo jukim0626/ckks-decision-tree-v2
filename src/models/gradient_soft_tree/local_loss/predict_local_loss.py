@@ -22,7 +22,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-from core.data.dataset import encrypt_dataset, load_scaled_dataset_subset, one_hot_encode  # noqa: E402
+from core.data.dataset import encrypt_dataset, load_scaler, one_hot_encode, split_dataset_subset  # noqa: E402
 from core.data.serialization import load_context  # noqa: E402
 from core.ckks_engine import create_bootstrap_engine, ensure_level  # noqa: E402
 from core.encrypted_ops.slot_packing import extract_weight_broadcast, next_power_of_two  # noqa: E402
@@ -102,7 +102,19 @@ def main() -> None:
     }
 
     # --- test set을 새로 encrypt (학습 때 쓴 train set과 별개, client가 하는 유일한 encrypt 작업) ---
-    X_train, X_test, y_train, y_test, _ = load_scaled_dataset_subset(config["dataset_name"])
+    # 2026-09-21: 예전엔 max_train을 안 넘겨서(local_loss_packed의 breast_cancer 세션처럼
+    # max_train을 실제로 쓴 경우) 학습 때와 다른 train subsample로 scaler가 fit돼 평가가
+    # 어긋날 위험이 있었다 - config에 저장된 실제 값으로 raw split을 재현하고, 학습 때
+    # 저장해둔 scaler로 transform만 한다(재적합 없음).
+    X_train_raw, X_test_raw, y_train, y_test, _ = split_dataset_subset(
+        config["dataset_name"], test_size=config.get("test_size", 0.2), max_train=config.get("max_train")
+    )
+    scaler = load_scaler(
+        session_dir / "client" / "scaler.json",
+        expected_dataset_name=config["dataset_name"],
+        expected_n_features=n_features,
+    )
+    X_test = scaler.transform(X_test_raw)
     y_test_oh = one_hot_encode(y_test, n_classes)  # encrypt_dataset 시그니처상 필요(추론엔 안 씀)
     dataset_test = encrypt_dataset(ctx, X_test, y_test_oh)
 

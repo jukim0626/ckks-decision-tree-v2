@@ -22,7 +22,13 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-from core.data.dataset import encrypt_dataset, load_scaled_dataset_subset, one_hot_encode  # noqa: E402
+from core.data.dataset import (  # noqa: E402
+    encrypt_dataset,
+    load_scaler,
+    one_hot_encode,
+    resolve_leaf_family_test_size,
+    split_dataset_subset,
+)
 from core.data.serialization import load_context  # noqa: E402
 from core.ckks_engine import create_bootstrap_engine  # noqa: E402
 from models.gradient_soft_tree.packed.block_ops import (  # noqa: E402
@@ -61,7 +67,20 @@ def main() -> None:
     }
 
     # --- test set을 새로 encrypt (학습 때 쓴 train set과 별개, client가 하는 유일한 encrypt 작업) ---
-    X_train, X_test, y_train, y_test, _ = load_scaled_dataset_subset(config["dataset_name"])
+    # 2026-09-21: 예전엔 test_size/max_train을 안 넘겨서 학습 때와 다른 test set/scaler로
+    # 평가할 위험이 있었다 - config에 저장된 실제 값(구세션은 resolve_leaf_family_test_size가
+    # 그 시점 기본값을 적용)으로 raw split을 재현하고, 학습 때 저장해둔 scaler로
+    # transform만 한다(재적합 없음).
+    test_size = resolve_leaf_family_test_size(config)
+    X_train_raw, X_test_raw, y_train, y_test, _ = split_dataset_subset(
+        config["dataset_name"], test_size=test_size, max_train=config.get("max_train")
+    )
+    scaler = load_scaler(
+        session_dir / "client" / "scaler.json",
+        expected_dataset_name=config["dataset_name"],
+        expected_n_features=n_features,
+    )
+    X_test = scaler.transform(X_test_raw)
     y_test_oh = one_hot_encode(y_test, n_classes)  # encrypt_dataset 시그니처상 필요(추론엔 안 씀)
     dataset_test = encrypt_dataset(ctx, X_test, y_test_oh)
     sample_mask_test = engine.encrypt([1.0] * dataset_test.n_samples, ctx.pk)
