@@ -8,8 +8,8 @@ plaintext reference와 대조) - `forward_backward_update_N` 대신
 `_debug_validate`도 애초에 mode="gpu"를 하드코딩해둔 이유가 이것으로 보인다. 이 스크립트도
 동일하게 GPU만 쓴다.
 
-python -m models.gradient_soft_tree.packed.debug_validate_packed <dataset> <depth> <epochs> <lr> [level_preset]
-예: python -m models.gradient_soft_tree.packed.debug_validate_packed iris 1 3 2.0 17
+python -m models.gradient_soft_tree.experiments.debug_validate_packed <dataset> <depth> <epochs> <lr> [level_preset]
+예: python -m models.gradient_soft_tree.experiments.debug_validate_packed iris 1 3 2.0 17
 """
 
 from __future__ import annotations

@@ -2,7 +2,7 @@
   results/bootstrap_optimization_summary.csv
   results/bootstrap_by_module.csv
 
-python -m models.gradient_soft_tree.opt.collect_results
+python -m models.gradient_soft_tree.experiments.collect_results
 """
 
 from __future__ import annotations

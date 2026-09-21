@@ -12,7 +12,7 @@ fetch(sklearn 번들 데이터셋이나 OpenML fetch)와 sklearn 버전이 학�
 바뀌거나 데이터 순서가 달라지는 등) 이 스크립트는 그 사실을 알 방법이 없다 - 그래서
 "명시적 migration"이지 "자동 복구"가 아니다.
 
-사용법: python -m models.gradient_soft_tree.migrate_scaler <session_dir>
+사용법: python -m models.gradient_soft_tree.experiments.migrate_scaler <session_dir>
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ def _looks_like_local_loss_family(params_dir: Path) -> bool:
 
 def main() -> None:
     if len(sys.argv) != 2:
-        print("사용법: python -m models.gradient_soft_tree.migrate_scaler <session_dir>", file=sys.stderr)
+        print("사용법: python -m models.gradient_soft_tree.experiments.migrate_scaler <session_dir>", file=sys.stderr)
         raise SystemExit(1)
     session_dir = Path(sys.argv[1])
     scaler_path = session_dir / "client" / "scaler.json"

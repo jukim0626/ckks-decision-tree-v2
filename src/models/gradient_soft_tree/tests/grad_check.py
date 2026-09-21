@@ -158,5 +158,9 @@ if __name__ == "__main__":
             failed.append((cfg.name, err))
     if failed:
         print("\nFAILED:", failed)
+        # 2026-09-21: 이전엔 여기서 그냥 print만 하고 정상 종료(exit 0)해서, CI나 `&&` 체인,
+        # 앞으로 tests/로 옮겨 pytest 등으로 돌릴 때 실패가 조용히 통과된 것처럼 보일 위험이
+        # 있었다 - 실패를 반드시 AssertionError(비정상 종료)로 전달한다.
+        raise AssertionError(f"gradient check 실패: {failed}")
     else:
         print("\nAll gradient checks passed (rel err < 1e-3).")

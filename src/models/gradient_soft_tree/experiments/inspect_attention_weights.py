@@ -2,7 +2,7 @@
 decrypt해서 출력 (attention_softmax=False면 raw a_ij 자체가 곧 "weight" - softmax 없이도
 feature selection이 sparse/near one-hot로 수렴하는지 육안 확인용).
 
-python -m models.gradient_soft_tree.opt.inspect_attention_weights <session_dir>
+python -m models.gradient_soft_tree.experiments.inspect_attention_weights <session_dir>
 """
 
 from __future__ import annotations

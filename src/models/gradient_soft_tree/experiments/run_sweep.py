@@ -1,6 +1,6 @@
 """여러 preset을 순차로(단일 GPU라 동시 실행 불가) 실행하는 배치 드라이버.
 
-python -m models.gradient_soft_tree.opt.run_sweep iris 3 1 2.0 0 17 recip14 recip8 recip6 recip4 ...
+python -m models.gradient_soft_tree.experiments.run_sweep iris 3 1 2.0 0 17 recip14 recip8 recip6 recip4 ...
 """
 
 from __future__ import annotations

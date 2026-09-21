@@ -2,7 +2,7 @@
 "ciphertext 값이 2~5 넘으면 조용히 깨진다"는 이 프로젝트의 기존 발견([[project-ckks-decision-tree]]
 reciprocal_approx.py 참고)에 해당하는지 확인하는 진단 스크립트.
 
-python -m models.gradient_soft_tree.opt.inspect_param_magnitudes <session_dir>
+python -m models.gradient_soft_tree.experiments.inspect_param_magnitudes <session_dir>
 """
 
 from __future__ import annotations

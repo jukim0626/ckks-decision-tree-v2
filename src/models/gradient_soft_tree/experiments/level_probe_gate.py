@@ -2,7 +2,7 @@
 소모하는지 실측하는 1회성 프로브 (depthN_ckks.py 주석의 "level_probe2.py 실측" 관행을
 그대로 따름). GPU에 데이터를 태우지 않고 최소 연산만 수행 - 몇 초 안에 끝난다.
 
-python -m models.gradient_soft_tree.opt.level_probe_gate
+python -m models.gradient_soft_tree.experiments.level_probe_gate
 """
 
 from __future__ import annotations

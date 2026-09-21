@@ -1,6 +1,6 @@
 """results/softmax_iteration_ablation.csv (Phase 1 요구 포맷)을 manifest.jsonl에서 뽑아낸다.
 
-python -m models.gradient_soft_tree.opt.collect_phase1
+python -m models.gradient_soft_tree.experiments.collect_phase1
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ import json
 import math
 from pathlib import Path
 
-from models.gradient_soft_tree.opt.collect_results import aggregate_profile, load_manifest_rows, load_result
+from models.gradient_soft_tree.experiments.collect_results import aggregate_profile, load_manifest_rows, load_result
 from models.gradient_soft_tree.opt.experiments_registry import get_preset
 
 REPO_ROOT = Path(__file__).resolve().parents[3]

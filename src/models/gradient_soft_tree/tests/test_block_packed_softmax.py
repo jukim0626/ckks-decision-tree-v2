@@ -5,7 +5,7 @@ GPU/bootstrap 없이 CPU mode로 먼저 정합성부터 확인한다.
 2026-09-15에 numpy(np.roll rotate 시뮬레이션)로만 검증됐던 걸, 여기서 처음으로 실제
 CKKS 엔진(다항식 evaluate_polynomial, bounded Newton-Raphson reciprocal 포함)으로 확인한다.
 
-python -m models.gradient_soft_tree.packed.test_block_packed_softmax
+python -m models.gradient_soft_tree.tests.test_block_packed_softmax
 """
 
 from __future__ import annotations

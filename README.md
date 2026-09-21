@@ -25,18 +25,22 @@ client-side decryption step during training.
 ```
 src/
 ├── core/                        # primitives shared across all models
-│   ├── ckks_engine.py            # CKKS engine/context creation, level (bootstrap) management
-│   ├── approximation/            # polynomial approximations (sigmoid, exp)
-│   ├── encrypted_ops/            # softmax, SIMD slot packing on ciphertexts
-│   └── data/                     # dataset loading/encryption, process-boundary serialization
+│   ├── ckks_engine.py             # CKKS engine/context creation, level (bootstrap) management
+│   ├── runtime/                   # GPU/subprocess/session-dir plumbing shared by every train.py
+│   ├── approximation/             # polynomial approximations (sigmoid, exp)
+│   ├── encrypted_ops/             # softmax, SIMD block/slot packing on ciphertexts
+│   └── data/                      # dataset loading/encryption, scaler persistence, process-boundary serialization
 │
 └── models/
     └── gradient_soft_tree/
         ├── gate.py                # shared gate computation (baseline + local_loss)
+        ├── params.py              # shared alpha/threshold/leaf_logits(local_logits) ciphertext I/O
         ├── baseline/              # gradient-descent soft tree, verified for depth 1-3
         ├── opt/                   # bootstrap-count reduction experiments
         ├── packed/                # feature-axis SIMD packing (~26x speedup on a depth-3 tree)
-        └── local_loss/            # per-level local-loss training (depth-independent backward depth)
+        ├── local_loss/            # per-level local-loss training (depth-independent backward depth)
+        ├── tests/                 # automated pass/fail checks (CPU-only, no GPU needed)
+        └── experiments/           # manual diagnostics, sweeps, and one-off migration tools
 ```
 
 ## Setup
@@ -59,6 +63,11 @@ python -m models.gradient_soft_tree.baseline.train iris 3 35 2.0 0 17
 
 # feature-axis SIMD packing
 python -m models.gradient_soft_tree.packed.train <dataset> <depth> <epochs> <lr> <seed> <level_preset>
+
+# automated checks (models/gradient_soft_tree/tests/) - test_block_ops/test_block_packed_softmax
+# need a CKKS engine (CPU mode, no GPU required); grad_check is pure numpy
+python -m models.gradient_soft_tree.tests.test_block_ops
+python -m models.gradient_soft_tree.tests.grad_check
 ```
 
 `<dataset>` is one of `iris`, `wine`, `breast_cancer`, `digits`, `diabetes`.

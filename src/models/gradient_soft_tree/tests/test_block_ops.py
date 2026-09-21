@@ -4,7 +4,7 @@ scatter_to_slot 자체 docstring의 "처음엔 rotate만 했는데... 버그가 
 2026-08-27의 masking 버그)가 전부 "회전 부호/패딩 오염을 잘못 짚었다"는 종류라, GPU 시간을
 쓰기 전에 여기서 손계산과 정확히 일치하는지부터 확인한다.
 
-python -m models.gradient_soft_tree.packed.test_block_ops
+python -m models.gradient_soft_tree.tests.test_block_ops
 """
 
 from __future__ import annotations
