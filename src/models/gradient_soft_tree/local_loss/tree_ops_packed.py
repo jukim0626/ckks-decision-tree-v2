@@ -37,8 +37,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from core.ckks_engine import ensure_level  # noqa: E402
 from core.approximation.sigmoid import sigmoid_approx_enc, STEEPNESS  # noqa: E402
-from core.encrypted_ops.slot_packing import next_power_of_two, scatter_to_slot  # noqa: E402
-from core.encrypted_ops.slot_packing import extract_weight_broadcast  # noqa: E402
+from core.encrypted_ops.slot_packing import extract_weight_broadcast, next_power_of_two  # noqa: E402
 from core.encrypted_ops.softmax import packed_softmax, softmax_backward_packed  # noqa: E402
 from models.gradient_soft_tree.packed.block_ops import (  # noqa: E402
     broadcast_full_to_blocks,
