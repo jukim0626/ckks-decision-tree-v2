@@ -26,56 +26,23 @@ from core.approximation.sigmoid import STEEPNESS  # noqa: E402
 from core.encrypted_ops.softmax import packed_softmax, softmax_backward_packed  # noqa: E402
 from models.gradient_soft_tree.gate import compute_axis_aligned_gate  # noqa: E402
 from models.gradient_soft_tree.local_loss.reference import train_depthN_local_loss  # noqa: E402
+# 2026-09-21 1차 리팩터: 레벨별 loss block의 (virtual_leaf, class) 조합 reduction에 쓰는
+# block SIMD primitive 4개(예전엔 _block_size_for/_scatter_terms_to_blocks/_block_local_sum/
+# _gather_block_tops로 로컬 재구현돼 있었음)는 packed/block_ops.py(feature-axis 용도)와
+# 완전히 동일한 코드였다 - core.encrypted_ops.block_ops로 통합된 원본을 그대로 쓴다
+# (수치 동작 변경 없음).
+from core.encrypted_ops.block_ops import (  # noqa: E402
+    block_local_sum,
+    compute_block_size,
+    gather_block_tops,
+    scatter_to_blocks,
+)
 
 _LOCAL_MIN_LEVEL = 5
 
 
 def _ensure_level(ctx, ct):
     return ensure_level(ctx, ct, min_level=_LOCAL_MIN_LEVEL)
-
-
-# ---- 레벨별 loss block의 (virtual_leaf, class) 조합 reduction을 block packing으로 묶기
-# 위한 프리미티브. packed/block_ops.py의 feature-axis 기법(block_local_sum 등)과 수학적으로
-# 동일하고, 이 실험 범위(local_loss만) 밖으로 안 퍼지도록 baseline/packed는 안 건드리고
-# 여기 로컬로 재구현했다. ----
-
-
-def _block_size_for(n_samples: int) -> int:
-    return next_power_of_two(2 * n_samples)
-
-
-def _scatter_terms_to_blocks(ctx, terms: list, block_size: int):
-    """terms[b](슬롯 [0,n_samples)에 실값)를 block b(슬롯 [b*block_size,(b+1)*block_size))로
-    옮겨서 전부 더한다. block_ops.py의 `_scatter_features_to_blocks`와 동일한 회전 규약."""
-    packed = None
-    for b, term in enumerate(terms):
-        piece = term if b == 0 else ctx.engine.rotate(term, ctx.rotation_key, b * block_size)
-        packed = piece if packed is None else ctx.engine.add(packed, piece)
-    return packed
-
-
-def _block_local_sum(ctx, blocked_ct, block_size: int):
-    """block마다 로컬 합을 구한다(doubling rotate-add, block_ops.py의 `block_local_sum`과
-    동일) - 결과에서 의미 있는 값은 각 block의 시작 슬롯(b*block_size)뿐이다."""
-    cur = blocked_ct
-    s = 1
-    while s < block_size:
-        cur = ctx.engine.add(cur, ctx.engine.rotate(cur, ctx.rotation_key, -s))
-        s *= 2
-    return cur
-
-
-def _gather_block_tops(ctx, reduced_ct, n_blocks: int, block_size: int, slot_count: int):
-    """`_block_local_sum` 결과에서 각 block의 시작 슬롯 값만 뽑아 슬롯 0..n_blocks-1에
-    packing(block_ops.py의 `gather_block_tops_to_packed`와 동일)."""
-    packed = None
-    for b in range(n_blocks):
-        mask = np.zeros(slot_count)
-        mask[b * block_size] = 1.0
-        masked = ctx.engine.multiply(reduced_ct, mask)
-        piece = masked if b == 0 else ctx.engine.rotate(masked, ctx.rotation_key, -b * (block_size - 1))
-        packed = piece if packed is None else ctx.engine.add(packed, piece)
-    return packed
 
 
 def init_encrypted_params_N(ctx, n_features: int, n_classes: int, depth: int, seed: int, slot_count: int):
@@ -196,7 +163,7 @@ def forward_backward_update_N(ctx, dataset, params: dict, sample_mask, n_feature
         # 하나로 묶어 reduction을 1번만 부르면 bootstrap 체크 지점이 레벨당 최대 1번으로
         # 줄어든다(packed/block_ops.py가 feature축에 쓴 것과 동일한 기법을 virtual-leaf
         # 축에 적용).
-        block_size = _block_size_for(n_samples)
+        block_size = compute_block_size(n_samples)
         n_blocks = n_virtual_leaves * n_classes
         assert n_blocks * block_size <= ctx.engine.slot_count, (
             f"virtual_leaf x class 조합({n_blocks}) x block_size({block_size})가 slot_count를 "
@@ -209,9 +176,9 @@ def forward_backward_update_N(ctx, dataset, params: dict, sample_mask, n_feature
                 term = ctx.engine.multiply(dL_dyhat_level[c], current_level_probs[k], ctx.rlk)
                 term = ctx.engine.multiply(term, sample_mask, ctx.rlk)
                 terms.append(ctx.engine.intt(term))
-        blocked = _scatter_terms_to_blocks(ctx, terms, block_size)
-        reduced = _ensure_level(ctx, _block_local_sum(ctx, blocked, block_size))
-        tops = _gather_block_tops(ctx, reduced, n_blocks, block_size, ctx.engine.slot_count)
+        blocked = scatter_to_blocks(ctx, terms, block_size)
+        reduced = _ensure_level(ctx, block_local_sum(ctx, blocked, block_size))
+        tops = gather_block_tops(ctx, reduced, n_blocks, block_size, ctx.engine.slot_count)
 
         class_mask = np.zeros(ctx.engine.slot_count)
         class_mask[:n_classes] = 1.0

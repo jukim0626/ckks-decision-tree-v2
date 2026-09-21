@@ -11,9 +11,11 @@ depth=3을 ~100시간→3.78시간으로 줄인 바로 그 문제.
 
 **이 파일의 역할**: gate 관련 부분(forward의 per-feature sigmoid 루프, backward의
 threshold/attention gradient)을 packed/tree_ops_packed.py와 동일한 feature-axis block
-packing으로 교체한다. local_loss 고유의 레벨별 loss 계산(virtual_leaf x class 축
-packing, `_block_size_for`/`_scatter_terms_to_blocks`/`_block_local_sum`/`_gather_block_tops`)은
+packing으로 교체한다. local_loss 고유의 레벨별 loss 계산(virtual_leaf x class 축 packing)은
 그대로 재사용 - 두 packing 축(feature-axis, virtual-leaf-axis)은 독립적이라 함께 쓸 수 있다.
+(2026-09-21: 두 축이 내부적으로 쓰던 block SIMD primitive가 완전히 동일한 코드였음이
+확인돼 `core.encrypted_ops.block_ops`로 통합됐다 - 이 파일은 이제 그 하나의 원본을
+feature-axis/virtual-leaf-axis 양쪽에 그대로 재사용한다.)
 
 baseline(`local_loss/tree_ops.py`)과 packed(`packed/tree_ops_packed.py`)는 절대 안
 건드림 - 이 파일은 둘의 로직을 조합해서 새로 짠 것.
@@ -39,7 +41,6 @@ from core.encrypted_ops.slot_packing import next_power_of_two, scatter_to_slot  
 from core.encrypted_ops.slot_packing import extract_weight_broadcast  # noqa: E402
 from core.encrypted_ops.softmax import packed_softmax, softmax_backward_packed  # noqa: E402
 from models.gradient_soft_tree.packed.block_ops import (  # noqa: E402
-    block_local_sum,
     broadcast_full_to_blocks,
     extract_block_to_full,
     gather_block_tops_to_packed,
@@ -49,48 +50,24 @@ from models.gradient_soft_tree.local_loss.tree_ops import (  # noqa: E402
     init_encrypted_params_N,
     decrypt_params_N,
 )
+# 2026-09-21 1차 리팩터: local_loss 고유의 virtual-leaf axis packing에 쓰던
+# _block_size_for/_scatter_terms_to_blocks/_block_local_sum/_gather_block_tops(예전엔
+# "tree_ops.py의 private helper라 import 대신 여기 복붙"했던 것)는 feature-axis용
+# gather_block_tops_to_packed와 수학적으로 완전히 동일한 코드였다 - core.encrypted_ops.
+# block_ops의 통합된 원본을 두 축(feature-axis/virtual-leaf-axis) 모두에 그대로 재사용한다
+# (수치 동작 변경 없음).
+from core.encrypted_ops.block_ops import (  # noqa: E402
+    block_local_sum,
+    compute_block_size,
+    gather_block_tops,
+    scatter_to_blocks,
+)
 
 _LOCAL_MIN_LEVEL = 5
 
 
 def _ensure_level(ctx, ct):
     return ensure_level(ctx, ct, min_level=_LOCAL_MIN_LEVEL)
-
-
-# ---- local_loss 고유의 virtual-leaf axis packing(tree_ops.py와 완전히 동일, 그대로 복붙 -
-# tree_ops.py의 private helper라 import 대신 이 파일에도 둔다) ----
-
-
-def _block_size_for(n_samples: int) -> int:
-    return next_power_of_two(2 * n_samples)
-
-
-def _scatter_terms_to_blocks(ctx, terms: list, block_size: int):
-    packed = None
-    for b, term in enumerate(terms):
-        piece = term if b == 0 else ctx.engine.rotate(term, ctx.rotation_key, b * block_size)
-        packed = piece if packed is None else ctx.engine.add(packed, piece)
-    return packed
-
-
-def _block_local_sum(ctx, blocked_ct, block_size: int):
-    cur = blocked_ct
-    s = 1
-    while s < block_size:
-        cur = ctx.engine.add(cur, ctx.engine.rotate(cur, ctx.rotation_key, -s))
-        s *= 2
-    return cur
-
-
-def _gather_block_tops(ctx, reduced_ct, n_blocks: int, block_size: int, slot_count: int):
-    packed = None
-    for b in range(n_blocks):
-        mask = np.zeros(slot_count)
-        mask[b * block_size] = 1.0
-        masked = ctx.engine.multiply(reduced_ct, mask)
-        piece = masked if b == 0 else ctx.engine.rotate(masked, ctx.rotation_key, -b * (block_size - 1))
-        packed = piece if packed is None else ctx.engine.add(packed, piece)
-    return packed
 
 
 def forward_backward_update_N_packed(
@@ -184,7 +161,7 @@ def forward_backward_update_N_packed(
             diff = ctx.engine.subtract(y_hat_level[c], dataset.enc_labels[c])
             dL_dyhat_level.append(_ensure_level(ctx, ctx.engine.multiply(diff, 2.0 / n_samples)))
 
-        loss_block_size = _block_size_for(n_samples)
+        loss_block_size = compute_block_size(n_samples)
         n_blocks = n_virtual_leaves * n_classes
         assert n_blocks * loss_block_size <= slot_count, (
             f"virtual_leaf x class 조합({n_blocks}) x block_size({loss_block_size})가 slot_count를 초과"
@@ -196,9 +173,9 @@ def forward_backward_update_N_packed(
                 term = ctx.engine.multiply(dL_dyhat_level[c], current_level_probs[k], ctx.rlk)
                 term = ctx.engine.multiply(term, sample_mask, ctx.rlk)
                 terms.append(ctx.engine.intt(term))
-        blocked = _scatter_terms_to_blocks(ctx, terms, loss_block_size)
-        reduced = _ensure_level(ctx, _block_local_sum(ctx, blocked, loss_block_size))
-        tops = _gather_block_tops(ctx, reduced, n_blocks, loss_block_size, slot_count)
+        blocked = scatter_to_blocks(ctx, terms, loss_block_size)
+        reduced = _ensure_level(ctx, block_local_sum(ctx, blocked, loss_block_size))
+        tops = gather_block_tops(ctx, reduced, n_blocks, loss_block_size, slot_count)
 
         class_mask = np.zeros(slot_count)
         class_mask[:n_classes] = 1.0

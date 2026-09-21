@@ -37,15 +37,18 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-from core.encrypted_ops.slot_packing import next_power_of_two  # noqa: E402
 from core.ckks_engine import ensure_level  # noqa: E402
 from core.encrypted_ops.softmax import softmax_exp_coeffs, SOFTMAX_EXP_INTERVAL  # noqa: E402
-
-
-def compute_block_size(n_samples: int) -> int:
-    """B = next_power_of_two(2*n_samples) - block_local_sum 정확성 조건(B/2>=n_samples)을
-    항상 만족하는 최소 2의 거듭제곱."""
-    return next_power_of_two(2 * n_samples)
+# 2026-09-21 1차 리팩터: compute_block_size/block_local_sum/gather_block_tops_to_packed/
+# _scatter_features_to_blocks는 이 파일이 아니라 core.encrypted_ops.block_ops가 원본이다
+# (local_loss/tree_ops.py, local_loss/tree_ops_packed.py에도 완전히 동일한 코드가 복붙돼
+# 있던 걸 통합함 - 수치 동작은 안 바뀜, 아래는 기존 이름을 그대로 쓰기 위한 재노출).
+from core.encrypted_ops.block_ops import (  # noqa: E402
+    block_local_sum,
+    compute_block_size,
+    gather_block_tops,
+    scatter_to_blocks,
+)
 
 
 def assert_layout_fits(n_features: int, block_size: int, slot_count: int) -> None:
@@ -69,30 +72,17 @@ def build_block_masks(n_features: int, block_size: int, slot_count: int) -> list
     return masks
 
 
-def _scatter_features_to_blocks(ctx, cts: list, block_size: int):
-    """cts[j](슬롯 [0,n_samples)에 실값, 나머지 0)를 block j(슬롯 [j*B,(j+1)*B))로 옮겨서
-    전부 더한 ciphertext 하나를 반환. rotate(ct,key,shift)[i]=ct[i-shift] 관례상, block j로
-    옮기려면 shift=+j*B(simd_argmin.scatter_to_slot/simd_reduce_argmin과 같은 부호 관례).
-    각 cts[j]의 실값 구간은 rotate 후 block j 안에만 놓이고 block끼리 절대 안 겹친다
-    (n_features*block_size<=slot_count을 assert_layout_fits로 이미 보장)."""
-    packed = None
-    for j, ct in enumerate(cts):
-        piece = ct if j == 0 else ctx.engine.rotate(ct, ctx.rotation_key, j * block_size)
-        packed = piece if packed is None else ctx.engine.add(packed, piece)
-    return packed
-
-
 def pack_dataset_features_blocked(ctx, enc_features: list, block_size: int):
     """dataset.enc_features(n_features개 개별 ciphertext, 각 슬롯 [0,n_samples)에 실값)를
     block 레이아웃 하나로 합친다. 데이터셋은 epoch마다 안 바뀌므로 setup 시 1회만 호출."""
-    return _scatter_features_to_blocks(ctx, enc_features, block_size)
+    return scatter_to_blocks(ctx, enc_features, block_size)
 
 
 def broadcast_full_to_blocks(ctx, full_ct, n_features: int, block_size: int):
     """샘플축 ciphertext(슬롯 [0,n_samples)에 실값) 하나를 모든 block에 복제. 같은 ct를
-    n_features번 반복한 리스트에 _scatter_features_to_blocks를 적용하는 것과 동일 -
+    n_features번 반복한 리스트에 scatter_to_blocks를 적용하는 것과 동일 -
     dL_dgate_i/gate(노드·epoch마다), sample_mask(setup 시 1회)에 쓴다."""
-    return _scatter_features_to_blocks(ctx, [full_ct] * n_features, block_size)
+    return scatter_to_blocks(ctx, [full_ct] * n_features, block_size)
 
 
 def pack_threshold_blocked(ctx, threshold_cts: list, block_masks: list):
@@ -107,37 +97,13 @@ def pack_threshold_blocked(ctx, threshold_cts: list, block_masks: list):
     return packed
 
 
-def block_local_sum(ctx, blocked_ct, block_size: int):
-    """block마다 로컬 합(=그 block의 n_samples개 실값의 합)을 구해서, 그 값을 block 안의
-    모든 슬롯에 broadcast한 ciphertext를 반환 - `ctx.engine.sum`과 달리 slot_count 전체가
-    아니라 block_size 폭으로만 reduction한다(log2(block_size)회 rotate, 서로 다른 block은
-    절대 안 섞임 - 모듈 docstring의 B>=2*n_samples 조건 참고).
-
-    **주의**: 이 결과에서 의미 있는 값은 슬롯 0, block_size, 2*block_size, ...(각 block의
-    시작 슬롯)뿐이다 - 다른 슬롯은 partial sliding-window 값이라 절대 직접 읽으면 안 된다
-    (`gather_block_tops_to_packed`로만 추출할 것)."""
-    cur = blocked_ct
-    s = 1
-    while s < block_size:
-        cur = ctx.engine.add(cur, ctx.engine.rotate(cur, ctx.rotation_key, -s))
-        s *= 2
-    return cur
-
-
 def gather_block_tops_to_packed(ctx, reduced_ct, n_features: int, block_size: int, slot_count: int):
-    """block_local_sum 결과에서 각 block의 시작 슬롯(j*block_size)에 있는 유효값만 뽑아서
-    슬롯 0..n_features-1에 packing - `w`(packed_softmax 결과)와 같은 레이아웃이라, 이후
-    dL_dt_j 전부를 `w`와의 elementwise 곱 한 번으로 계산할 수 있게 해준다.
-    rotate(ct,key,shift)[i]=ct[i-shift] 관례상 new[j]=old[j*B]가 되려면 shift=-j*(B-1)
-    (i=j, i-shift=j*B -> shift=j-j*B=-j*(B-1))."""
-    packed = None
-    for j in range(n_features):
-        mask = np.zeros(slot_count)
-        mask[j * block_size] = 1.0
-        masked = ctx.engine.multiply(reduced_ct, mask)
-        piece = masked if j == 0 else ctx.engine.rotate(masked, ctx.rotation_key, -j * (block_size - 1))
-        packed = piece if packed is None else ctx.engine.add(packed, piece)
-    return packed
+    """`gather_block_tops`의 feature-axis 전용 이름(외부 호출부가 이 이름으로 import하고
+    있어 그대로 유지) - block_local_sum 결과에서 각 block의 시작 슬롯(j*block_size)에 있는
+    유효값만 뽑아서 슬롯 0..n_features-1에 packing한다. `w`(packed_softmax 결과)와 같은
+    레이아웃이라, 이후 dL_dt_j 전부를 `w`와의 elementwise 곱 한 번으로 계산할 수 있게
+    해준다."""
+    return gather_block_tops(ctx, reduced_ct, n_features, block_size, slot_count)
 
 
 def extract_block_to_full(ctx, blocked_ct, feature_idx: int, block_size: int, sample_mask):
