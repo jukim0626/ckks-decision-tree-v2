@@ -222,6 +222,13 @@ def load_scaler(path: Path, *, expected_dataset_name: str, expected_n_features: 
     return scaler
 
 
+# session config.json의 preprocessing 관련 필드 스키마 버전. v2부터 setup_worker가 이
+# 필드를 명시적으로 쓴다("config_schema_version": SESSION_CONFIG_SCHEMA_VERSION) - 이
+# 필드가 없는 세션(v1, 버전 개념이 생기기 전)은 계열(leaf_logits vs local_logits)마다
+# 실제 과거 동작에 근거해 다르게 해석해야 한다(resolve_leaf_family_test_size 참고).
+SESSION_CONFIG_SCHEMA_VERSION = 2
+
+
 def resolve_leaf_family_test_size(config: dict) -> float | int:
     """baseline/packed/opt(=leaf_logits 파라미터 스키마) 세션의 test_size를 안전하게
     복원한다. local_loss(=local_logits 스키마)에는 안 쓴다 - local_loss/setup_worker.py는
