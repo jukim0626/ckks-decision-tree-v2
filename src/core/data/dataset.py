@@ -8,7 +8,10 @@
 
 from __future__ import annotations
 
+import json
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -97,17 +100,18 @@ def encrypt_dataset(ctx: Any, X: np.ndarray, y_one_hot: np.ndarray) -> Encrypted
     )
 
 
-def load_scaled_dataset_subset(
+def split_dataset_subset(
     dataset_name: str = "iris",
     test_size: float | int = 0.2,
     max_train: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str]]:
-    """지정한 sklearn dataset을 train/test로 나눠서 쓴다 (train 기준 minmax_minus1_1
-    scaling). test_size는 sklearn train_test_split 그대로: 0<x<1이면 비율(기본 0.2 ->
-    80/20 split), 정수면 절대 개수(과거 기본값이었던 고정 30개 방식 - 데이터셋마다 train
-    비율이 들쭉날쭉해지는 문제가 있어 비율 기본값으로 전환함).
+    """`load_scaled_dataset_subset`에서 scaling만 뺀 raw train/test split.
 
-    max_train을 주면 train을 그 개수로 stratified subsample한다."""
+    2026-09-21: 학습 때 fit한 scaler를 세션 파일로 저장해서 inference에서 재사용하려면
+    (재적합 없이) 이 함수로 raw split을 얻은 뒤 `fit_scaler`/`save_scaler`/`load_scaler`를
+    따로 조합해서 쓴다 - `load_scaled_dataset_subset`처럼 매번 새로 fit하지 않는다.
+    `random_state=42`로 고정돼 있어 같은 (dataset_name, test_size, max_train)이면 항상
+    같은 split을 낸다."""
     if dataset_name not in _DATASET_LOADERS:
         raise ValueError(
             f"unknown dataset: {dataset_name!r}. choose from {sorted(_DATASET_LOADERS)}"
@@ -128,8 +132,111 @@ def load_scaled_dataset_subset(
             random_state=42,
             stratify=y_train,
         )
-    scaler = MinMaxScaler(feature_range=(-1.0, 1.0))
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled = scaler.transform(X_test)
     class_names = [str(name) for name in data.target_names]
-    return X_train_scaled, X_test_scaled, y_train, y_test, class_names
+    return X_train, X_test, y_train, y_test, class_names
+
+
+def fit_scaler(X_train_raw: np.ndarray, feature_range: tuple[float, float] = (-1.0, 1.0)) -> MinMaxScaler:
+    scaler = MinMaxScaler(feature_range=feature_range)
+    scaler.fit(X_train_raw)
+    return scaler
+
+
+def load_scaled_dataset_subset(
+    dataset_name: str = "iris",
+    test_size: float | int = 0.2,
+    max_train: int | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str]]:
+    """지정한 sklearn dataset을 train/test로 나눠서 쓴다 (train 기준 minmax_minus1_1
+    scaling). test_size는 sklearn train_test_split 그대로: 0<x<1이면 비율(기본 0.2 ->
+    80/20 split), 정수면 절대 개수(과거 기본값이었던 고정 30개 방식 - 데이터셋마다 train
+    비율이 들쭉날쭉해지는 문제가 있어 비율 기본값으로 전환함).
+
+    max_train을 주면 train을 그 개수로 stratified subsample한다.
+
+    2026-09-21: 내부적으로 `split_dataset_subset`+`fit_scaler`로 나뉘었을 뿐 반환값/동작은
+    이전과 동일하다 - scaler를 세션 간에 유지할 필요가 없는 호출부(plaintext reference
+    비교, 1회성 디버그 스크립트 등)는 계속 이 함수를 그대로 쓰면 된다. **주의**: 이 함수는
+    호출할 때마다 scaler를 새로 fit한다 - 학습 때와 다른 프로세스(finalize/predict)에서
+    "같은 스케일링"이 보장돼야 하는 경우에는 이 함수 대신 학습 때 저장한 scaler를
+    `load_scaler`로 복원해서 `.transform()`만 호출할 것(재적합 금지)."""
+    X_train, X_test, y_train, y_test, class_names = split_dataset_subset(dataset_name, test_size, max_train)
+    scaler = fit_scaler(X_train)
+    return scaler.transform(X_train), scaler.transform(X_test), y_train, y_test, class_names
+
+
+SCALER_SCHEMA_VERSION = 1
+
+
+def save_scaler(scaler: MinMaxScaler, path: Path, *, dataset_name: str) -> None:
+    """학습 때 fit한 scaler를 client 측 preprocessing 산출물로 저장한다 - 호출부는 이걸
+    session_dir의 서버 쪽 자료(keys/dataset/params)와 분리된 위치(예: session_dir/client/)에
+    두는 걸 권장(이 함수 자체가 경로를 강제하지는 않음). pickle/joblib 대신 JSON으로,
+    `.transform()` 복원에 필요한 값(min_/scale_)과 검증용 메타데이터(dataset_name,
+    feature 수, feature_range, data_min_/data_max_)만 남긴다."""
+    payload = {
+        "schema_version": SCALER_SCHEMA_VERSION,
+        "dataset_name": dataset_name,
+        "n_features": int(scaler.n_features_in_),
+        "feature_range": list(scaler.feature_range),
+        "data_min_": scaler.data_min_.tolist(),
+        "data_max_": scaler.data_max_.tolist(),
+        "scale_": scaler.scale_.tolist(),
+        "min_": scaler.min_.tolist(),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload))
+
+
+def load_scaler(path: Path, *, expected_dataset_name: str, expected_n_features: int) -> MinMaxScaler:
+    """`save_scaler`로 저장한 JSON을 복원한다(재적합 없음 - transform 전용).
+    dataset_name/feature 수가 지금 이 프로세스가 기대하는 값과 다르면(설정 실수로 다른
+    데이터셋의 scaler를 잘못 로드하는 사고를 막기 위해) 조용히 넘어가지 않고 즉시
+    실패한다. 파일 자체가 없으면(scaler를 저장하지 않던 예전 세션) 명확한 안내와 함께
+    실패한다 - 값을 추측해서 조용히 다른 preprocessing으로 넘어가지 않는다."""
+    if not path.exists():
+        raise FileNotFoundError(
+            f"scaler 파일이 없습니다: {path}. 이 session은 scaler를 저장하지 않는 예전 코드로 "
+            "만들어졌을 가능성이 높습니다 - migrate_scaler.py로 재구성하거나(원본 데이터/"
+            "sklearn 버전이 학습 당시와 같다는 전제 하에만 유효하고, 정확한 복원을 보장하지 "
+            "않음) 세션을 다시 학습하세요."
+        )
+    payload = json.loads(path.read_text())
+    if payload.get("schema_version") != SCALER_SCHEMA_VERSION:
+        raise ValueError(f"지원하지 않는 scaler schema_version: {payload.get('schema_version')!r}")
+    if payload["dataset_name"] != expected_dataset_name:
+        raise ValueError(
+            f"scaler dataset_name 불일치: 파일={payload['dataset_name']!r} vs 기대값={expected_dataset_name!r}"
+        )
+    if payload["n_features"] != expected_n_features:
+        raise ValueError(
+            f"scaler n_features 불일치: 파일={payload['n_features']} vs 기대값={expected_n_features}"
+        )
+    scaler = MinMaxScaler(feature_range=tuple(payload["feature_range"]))
+    scaler.n_features_in_ = payload["n_features"]
+    scaler.data_min_ = np.array(payload["data_min_"])
+    scaler.data_max_ = np.array(payload["data_max_"])
+    scaler.data_range_ = scaler.data_max_ - scaler.data_min_
+    scaler.scale_ = np.array(payload["scale_"])
+    scaler.min_ = np.array(payload["min_"])
+    return scaler
+
+
+def resolve_leaf_family_test_size(config: dict) -> float | int:
+    """baseline/packed/opt(=leaf_logits 파라미터 스키마) 세션의 test_size를 안전하게
+    복원한다. local_loss(=local_logits 스키마)에는 안 쓴다 - local_loss/setup_worker.py는
+    test_size를 CLI로 받은 적이 없어 언제 만든 세션이든 항상 0.2였으므로(`config.get
+    ("test_size", 0.2)`로 충분, 이건 추측이 아니라 실제 과거 동작) 이 함수가 필요 없다.
+
+    baseline/packed/opt 계열은 2026-09-18부터 config.json에 test_size를 명시적으로
+    저장한다. 그 이전 세션은 이 키 자체가 없는데, 그 시점 `load_scaled_dataset_subset`의
+    실제 기본값이 test_size=30(절대 개수)이었다는 게 git 이력으로 확인되는 사실이라
+    이 값을 쓴다 - 지금 코드의 기본값(0.2)으로 넘겨짚지 않는다."""
+    if "test_size" in config:
+        return config["test_size"]
+    print(
+        "[경고] config.json에 test_size가 없습니다 - 2026-09-18 이전 세션으로 보고 "
+        "그 시점 코드의 실제 기본값(test_size=30, 절대 개수)을 적용합니다.",
+        file=sys.stderr,
+    )
+    return 30
