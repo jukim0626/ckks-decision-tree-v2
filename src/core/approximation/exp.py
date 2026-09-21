@@ -36,3 +36,13 @@ def chebyshev_approximation_exp(
     transformed = np.polynomial.polynomial.Polynomial(poly_coeffs_std)
     final_poly = transformed(np.polynomial.polynomial.Polynomial([shift, scale]))
     return final_poly.coef
+
+
+def chebyshev_approximation_exp_plain(degree: int, interval: tuple[float, float]) -> np.ndarray:
+    """exp(x)(x in interval, beta 없는 단순 버전)의 Chebyshev interpolation polynomial 계수.
+
+    2026-09-15: softmax.py가 매번 "beta=-1.0을 줘서 exp(+x)를 얻는다"는 부호 반전을
+    설명해야 했던 게 헷갈린다는 피드백으로 신설 - beta 개념을 아예 감춘 얇은 wrapper.
+    beta가 진짜로 필요한 archive/closed_form_mgi는 계속 chebyshev_approximation_exp를
+    직접 쓰고, 이 함수는 손대지 않는다(같은 로직이라 결과 계수는 100% 동일)."""
+    return chebyshev_approximation_exp(degree, beta=-1.0, interval=interval)

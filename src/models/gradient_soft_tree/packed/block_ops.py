@@ -30,6 +30,7 @@ masking 버그(패딩 오염이 2 epoch 지나야 발산으로 드러난 사례)
 
 from __future__ import annotations
 
+import gc
 import sys
 from pathlib import Path
 
@@ -37,6 +38,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from core.encrypted_ops.slot_packing import next_power_of_two  # noqa: E402
+from core.ckks_engine import ensure_level  # noqa: E402
+from core.encrypted_ops.softmax import softmax_exp_coeffs, SOFTMAX_EXP_INTERVAL  # noqa: E402
 
 
 def compute_block_size(n_samples: int) -> int:
@@ -155,3 +158,76 @@ def extract_block_to_full(ctx, blocked_ct, feature_idx: int, block_size: int, sa
     =ct[i-shift]로 new[i]=old[i+j*B]가 되려면 shift=-j*B."""
     shifted = blocked_ct if feature_idx == 0 else ctx.engine.rotate(blocked_ct, ctx.rotation_key, -feature_idx * block_size)
     return ctx.engine.multiply(shifted, sample_mask, ctx.rlk)
+
+
+def broadcast_within_block(ctx, ct, block_size: int):
+    """block 시작 슬롯(0, B, 2B, ...)에만 값이 있다고 가정하고, 그 값을 각자의 block 전체
+    슬롯에 복제한다 - block_local_sum의 "역방향" doubling(거리 1,2,4,...,B/2로 자기 자신을
+    +방향 rotate+add). block_local_sum은 여러 block을 한 ciphertext에 packing한 상태에서는
+    시작 슬롯 외엔 신뢰할 수 없으므로(다른 block의 부분합이 rotate로 섞여 들어옴 - 2026-09-15
+    numpy 시뮬레이션으로 실측 확인), 반드시 그 시작 슬롯만 마스킹으로 골라낸 뒤 이 함수로
+    다시 펼쳐야 한다."""
+    cur = ct
+    s = 1
+    while s < block_size:
+        cur = ctx.engine.add(cur, ctx.engine.rotate(cur, ctx.rotation_key, s))
+        s *= 2
+    return cur
+
+
+def block_packed_softmax(
+    ctx, wide_ct, n_groups: int, n_valid: int, block_size: int,
+    reciprocal_iterations: int = 10, min_level: int = 5,
+):
+    """`core.encrypted_ops.softmax.packed_softmax`와 수학적으로 동일한 결과를, n_groups개의
+    독립적인 softmax(예: internal node별 attention weight, 혹은 leaf별 class distribution)에
+    대해 **한 번의 호출로 동시에** 계산한다. 각 group(=block)은 wide ciphertext의 슬롯
+    `[g*block_size, g*block_size+n_valid)`에 값, 나머지는 0 패딩.
+
+    핵심 차이는 분모(denom) 계산 단계뿐이다: `ctx.engine.sum()`(slot_count=32768 전체,
+    log2(32768)=15회 rotate, group마다 따로 불러야 함)을 `block_local_sum` +
+    `broadcast_within_block`(둘 다 log2(block_size)회, **모든 group을 SIMD로 동시에**
+    처리)로 대체했다. n_groups개를 개별 packed_softmax로 부르면 `n_groups*15`번 rotate가
+    필요했던 게, 이 함수 한 번이면 `2*log2(block_size)`번으로 끝난다.
+
+    2026-09-15 신설: numpy(`np.roll`로 rotate 시뮬레이션)로 로직 정확성은 사전 검증
+    완료(다중 block에서도 plaintext softmax와 정확히 일치) - 실제 CKKS 엔진 정합성은
+    아직 GPU 실측 전. baseline/기존 packed_softmax는 전혀 안 건드림(이 함수는 순수
+    추가분)."""
+    slot_count = ctx.engine.slot_count
+    valid_mask = np.zeros(slot_count)
+    start_mask = np.zeros(slot_count)
+    for g in range(n_groups):
+        valid_mask[g * block_size: g * block_size + n_valid] = 1.0
+        start_mask[g * block_size] = 1.0
+
+    z = ctx.engine.multiply(wide_ct, valid_mask)
+    z = ctx.engine.intt(z)
+    z = ensure_level(ctx, z, min_level=10)
+    exp_coeffs = softmax_exp_coeffs()
+    exp_max = float(np.exp(SOFTMAX_EXP_INTERVAL[1]))
+    exp_val = ctx.engine.evaluate_polynomial(z, exp_coeffs, ctx.rlk)
+    exp_val = ctx.engine.multiply(exp_val, 1.0 / exp_max)
+    exp_val = ctx.engine.multiply(exp_val, valid_mask)  # exp(0)=1 패딩 재오염 방지
+
+    exp_val_for_sum = ctx.engine.intt(exp_val)
+    block_sums = block_local_sum(ctx, exp_val_for_sum, block_size)
+    block_sums = ctx.engine.multiply(block_sums, start_mask)  # 시작 슬롯 외엔 부분합 쓰레기라 마스킹
+    denom = broadcast_within_block(ctx, block_sums, block_size)
+    denom = ensure_level(ctx, denom, min_level=min_level)
+    exp_val = ensure_level(ctx, exp_val, min_level=min_level)
+
+    y0 = 1.0 / n_valid
+    z_iter = ctx.engine.multiply(denom, y0)
+    w = ctx.engine.multiply(exp_val, y0)
+    for i in range(reciprocal_iterations):
+        z_iter = ensure_level(ctx, z_iter, min_level=min_level)
+        w = ensure_level(ctx, w, min_level=min_level)
+        two_minus_z = ctx.engine.subtract(2.0, z_iter)
+        z_new = ctx.engine.multiply(z_iter, two_minus_z, ctx.rlk)
+        w = ctx.engine.multiply(w, two_minus_z, ctx.rlk)
+        z_iter = z_new
+        del two_minus_z
+        if i % 5 == 0:
+            gc.collect()
+    return w

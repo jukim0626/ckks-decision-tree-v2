@@ -13,7 +13,7 @@ import gc
 import numpy as np
 
 from core.ckks_engine import ensure_level
-from core.approximation.exp import chebyshev_approximation_exp
+from core.approximation.exp import chebyshev_approximation_exp_plain
 
 SOFTMAX_EXP_DEGREE = 20
 SOFTMAX_EXP_INTERVAL = (-2.5, 2.5)
@@ -26,9 +26,8 @@ SOFTMAX_RECIP_ITERATIONS = 10
 
 
 def softmax_exp_coeffs(interval: tuple[float, float] = SOFTMAX_EXP_INTERVAL, degree: int = SOFTMAX_EXP_DEGREE) -> list[float]:
-    """exp(z)(z in interval)의 Chebyshev 계수. exp(-beta*x) 피팅 함수에 beta=-1을 줘서
-    exp(+x)를 얻는다."""
-    return chebyshev_approximation_exp(degree, beta=-1.0, interval=interval).tolist()
+    """exp(z)(z in interval)의 Chebyshev 계수."""
+    return chebyshev_approximation_exp_plain(degree, interval).tolist()
 
 
 _EXP_COEFFS = softmax_exp_coeffs()
