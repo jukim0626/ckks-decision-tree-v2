@@ -16,6 +16,7 @@ from core.data.serialization import load_context  # noqa: E402
 from core.ckks_engine import create_bootstrap_engine  # noqa: E402
 from models.gradient_soft_tree.local_loss.tree_ops import decrypt_params_N  # noqa: E402
 from models.gradient_soft_tree.local_loss.reference import predict as plaintext_predict, train_depthN_local_loss  # noqa: E402
+from models.gradient_soft_tree.params import load_alpha, load_local_logits, load_threshold  # noqa: E402
 
 
 def main() -> None:
@@ -37,15 +38,9 @@ def main() -> None:
 
     params_dir = session_dir / "params"
     final_params = {
-        "alpha": [engine.read_ciphertext(params_dir / f"alpha_{i}.ct") for i in range(n_internal)],
-        "threshold": [
-            [engine.read_ciphertext(params_dir / f"threshold_{i}_{j}.ct") for j in range(n_features)]
-            for i in range(n_internal)
-        ],
-        "local_logits": [
-            [engine.read_ciphertext(params_dir / f"local_{level}_{k}.ct") for k in range(1 << (level + 1))]
-            for level in range(depth)
-        ],
+        "alpha": load_alpha(engine, params_dir, n_internal),
+        "threshold": load_threshold(engine, params_dir, n_internal, n_features),
+        "local_logits": load_local_logits(engine, params_dir, depth),
     }
     decoded = decrypt_params_N(ctx, final_params, n_features, n_classes, depth)
 

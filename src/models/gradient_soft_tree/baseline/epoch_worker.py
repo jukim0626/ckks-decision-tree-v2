@@ -15,6 +15,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from core.data.serialization import load_context, read_dataset  # noqa: E402
 from core.ckks_engine import create_bootstrap_engine  # noqa: E402
 from models.gradient_soft_tree.baseline.tree_ops import forward_backward_update_N  # noqa: E402
+from models.gradient_soft_tree.params import (  # noqa: E402
+    load_alpha,
+    load_leaf_logits,
+    load_threshold,
+    save_alpha,
+    save_leaf_logits,
+    save_threshold,
+)
 
 # 2026-08-26: 파라미터를 읽자마자 min_level=25로 강제 bootstrap하는 시도를 해봤으나 실패함
 # (43개 ciphertext를 전부 즉시 refresh하는 비용 자체가 커서 오히려 더 일찍 OOM남 - desilofhe는
@@ -46,24 +54,18 @@ def main() -> None:
 
     params_dir = session_dir / "params"
     params = {
-        "alpha": [engine.read_ciphertext(params_dir / f"alpha_{i}.ct") for i in range(n_internal)],
-        "threshold": [
-            [engine.read_ciphertext(params_dir / f"threshold_{i}_{j}.ct") for j in range(n_features)]
-            for i in range(n_internal)
-        ],
-        "leaf_logits": [engine.read_ciphertext(params_dir / f"leaf_{l}.ct") for l in range(n_leaves)],
+        "alpha": load_alpha(engine, params_dir, n_internal),
+        "threshold": load_threshold(engine, params_dir, n_internal, n_features),
+        "leaf_logits": load_leaf_logits(engine, params_dir, n_leaves),
     }
 
     new_params = forward_backward_update_N(
         ctx, dataset, params, sample_mask, n_features, config["n_classes"], depth, lr=config["lr"]
     )
 
-    for i in range(n_internal):
-        engine.write_ciphertext(new_params["alpha"][i], params_dir / f"alpha_{i}.ct")
-        for j in range(n_features):
-            engine.write_ciphertext(new_params["threshold"][i][j], params_dir / f"threshold_{i}_{j}.ct")
-    for l in range(n_leaves):
-        engine.write_ciphertext(new_params["leaf_logits"][l], params_dir / f"leaf_{l}.ct")
+    save_alpha(engine, params_dir, new_params["alpha"])
+    save_threshold(engine, params_dir, new_params["threshold"])
+    save_leaf_logits(engine, params_dir, new_params["leaf_logits"])
 
 
 if __name__ == "__main__":

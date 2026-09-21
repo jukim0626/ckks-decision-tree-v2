@@ -19,6 +19,7 @@ from core.data.dataset import encrypt_dataset, load_scaled_dataset_subset, one_h
 from core.data.serialization import write_dataset, write_keys  # noqa: E402
 from core.ckks_engine import create_bootstrap_context  # noqa: E402
 from models.gradient_soft_tree.local_loss.tree_ops import init_encrypted_params_N  # noqa: E402
+from models.gradient_soft_tree.params import save_alpha, save_local_logits, save_threshold  # noqa: E402
 
 
 def main() -> None:
@@ -34,7 +35,6 @@ def main() -> None:
     n_features = X_train.shape[1]
     n_classes = int(max(y_train.max(), y_test.max()) + 1)
     y_train_oh = one_hot_encode(y_train, n_classes)
-    n_internal = (1 << depth) - 1
 
     ctx = create_bootstrap_context(mode="gpu", level_preset=level_preset)
     dataset = encrypt_dataset(ctx, X_train, y_train_oh)
@@ -48,13 +48,9 @@ def main() -> None:
     params = init_encrypted_params_N(ctx, n_features, n_classes, depth, seed=seed, slot_count=ctx.engine.slot_count)
     params_dir = session_dir / "params"
     params_dir.mkdir(parents=True, exist_ok=True)
-    for i in range(n_internal):
-        ctx.engine.write_ciphertext(params["alpha"][i], params_dir / f"alpha_{i}.ct")
-        for j in range(n_features):
-            ctx.engine.write_ciphertext(params["threshold"][i][j], params_dir / f"threshold_{i}_{j}.ct")
-    for level in range(depth):
-        for k in range(1 << (level + 1)):
-            ctx.engine.write_ciphertext(params["local_logits"][level][k], params_dir / f"local_{level}_{k}.ct")
+    save_alpha(ctx.engine, params_dir, params["alpha"])
+    save_threshold(ctx.engine, params_dir, params["threshold"])
+    save_local_logits(ctx.engine, params_dir, params["local_logits"])
 
     config = {
         "n_features": n_features,

@@ -19,6 +19,14 @@ from models.gradient_soft_tree.opt.config import TreeConfig  # noqa: E402
 from models.gradient_soft_tree.opt.engine_counter import CountingEngineProxy  # noqa: E402
 from models.gradient_soft_tree.opt.profiler import BootstrapProfiler  # noqa: E402
 from models.gradient_soft_tree.opt.tree_ops import forward_backward_update_N_opt  # noqa: E402
+from models.gradient_soft_tree.params import (  # noqa: E402
+    load_alpha,
+    load_leaf_logits,
+    load_threshold,
+    save_alpha,
+    save_leaf_logits,
+    save_threshold,
+)
 
 import re
 
@@ -57,12 +65,9 @@ def main() -> None:
 
     params_dir = session_dir / "params"
     params = {
-        "alpha": [engine.read_ciphertext(params_dir / f"alpha_{i}.ct") for i in range(n_internal)],
-        "threshold": [
-            [engine.read_ciphertext(params_dir / f"threshold_{i}_{j}.ct") for j in range(n_features)]
-            for i in range(n_internal)
-        ],
-        "leaf_logits": [engine.read_ciphertext(params_dir / f"leaf_{l}.ct") for l in range(n_leaves)],
+        "alpha": load_alpha(engine, params_dir, n_internal),
+        "threshold": load_threshold(engine, params_dir, n_internal, n_features),
+        "leaf_logits": load_leaf_logits(engine, params_dir, n_leaves),
     }
 
     counter = CountingEngineProxy(engine)
@@ -106,12 +111,9 @@ def main() -> None:
         json.dumps({"start": level_at_start, "end": level_at_end}, indent=2)
     )
 
-    for i in range(n_internal):
-        engine.write_ciphertext(new_params["alpha"][i], params_dir / f"alpha_{i}.ct")
-        for j in range(n_features):
-            engine.write_ciphertext(new_params["threshold"][i][j], params_dir / f"threshold_{i}_{j}.ct")
-    for l in range(n_leaves):
-        engine.write_ciphertext(new_params["leaf_logits"][l], params_dir / f"leaf_{l}.ct")
+    save_alpha(engine, params_dir, new_params["alpha"])
+    save_threshold(engine, params_dir, new_params["threshold"])
+    save_leaf_logits(engine, params_dir, new_params["leaf_logits"])
 
     profile_dir = session_dir / "profile"
     profile_dir.mkdir(parents=True, exist_ok=True)

@@ -22,6 +22,14 @@ from models.gradient_soft_tree.packed.block_ops import (  # noqa: E402
     pack_dataset_features_blocked,
 )
 from models.gradient_soft_tree.local_loss.tree_ops_packed import forward_backward_update_N_packed  # noqa: E402
+from models.gradient_soft_tree.params import (  # noqa: E402
+    load_alpha,
+    load_local_logits,
+    load_threshold,
+    save_alpha,
+    save_local_logits,
+    save_threshold,
+)
 
 
 def main() -> None:
@@ -52,15 +60,9 @@ def main() -> None:
 
     params_dir = session_dir / "params"
     params = {
-        "alpha": [engine.read_ciphertext(params_dir / f"alpha_{i}.ct") for i in range(n_internal)],
-        "threshold": [
-            [engine.read_ciphertext(params_dir / f"threshold_{i}_{j}.ct") for j in range(n_features)]
-            for i in range(n_internal)
-        ],
-        "local_logits": [
-            [engine.read_ciphertext(params_dir / f"local_{level}_{k}.ct") for k in range(1 << (level + 1))]
-            for level in range(depth)
-        ],
+        "alpha": load_alpha(engine, params_dir, n_internal),
+        "threshold": load_threshold(engine, params_dir, n_internal, n_features),
+        "local_logits": load_local_logits(engine, params_dir, depth),
     }
 
     new_params = forward_backward_update_N_packed(
@@ -68,13 +70,9 @@ def main() -> None:
         block_masks, block_size, n_features, config["n_classes"], depth, lr=config["lr"],
     )
 
-    for i in range(n_internal):
-        engine.write_ciphertext(new_params["alpha"][i], params_dir / f"alpha_{i}.ct")
-        for j in range(n_features):
-            engine.write_ciphertext(new_params["threshold"][i][j], params_dir / f"threshold_{i}_{j}.ct")
-    for level in range(depth):
-        for k in range(1 << (level + 1)):
-            engine.write_ciphertext(new_params["local_logits"][level][k], params_dir / f"local_{level}_{k}.ct")
+    save_alpha(engine, params_dir, new_params["alpha"])
+    save_threshold(engine, params_dir, new_params["threshold"])
+    save_local_logits(engine, params_dir, new_params["local_logits"])
 
 
 if __name__ == "__main__":
