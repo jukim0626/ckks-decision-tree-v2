@@ -1,14 +1,14 @@
-"""gradient_soft_tree 계열이 공유하는 axis-aligned attention-blend gate 계산.
+"""gradient_soft_tree(baseline)의 axis-aligned attention-blend gate 계산.
 
 각 internal node의 gate = sum_j softmax(alpha)_j * sigmoid(steepness*(feature_j - threshold_j))
 - feature마다 개별 sigmoid를 만들고 학습 가능한 softmax attention(alpha)으로 blend한다.
-baseline과 local_loss가 이 계산을 완전히 동일하게 쓴다(2026-09-09 리팩터 전에는 두 파일에
-그대로 복붙돼 있었음 - 하나를 고치면 다른 하나도 똑같이 고쳐야 하는 상태였다).
 
-opt/, packed/는 이 함수를 그대로 안 쓴다: opt는 이 계산 자체를 여러 방식으로 변형해서
-bootstrap 횟수를 줄이는 실험이 목적이고(TreeConfig 플래그로 계산 자체가 달라짐), packed는
-레이아웃 자체가 달라서(feature-axis SIMD block packing) 이 형태로 재사용할 수 없다 -
-"모델별로 달라지는 개념은 따로 빼지 않는다"는 원칙에 따라 이 둘은 자기 파일 안에 그대로 둔다."""
+packed/는 이 함수를 그대로 안 쓴다 - 레이아웃 자체가 달라서(feature-axis SIMD block
+packing) 이 형태로 재사용할 수 없다(자기 파일 안에 `_node_gate_packed`로 따로 있음).
+
+2026-09-22: 예전엔 local_loss도 이 함수를 그대로 공유해서 썼으나(2026-09-09 리팩터 전에는
+baseline과 local_loss 두 파일에 그대로 복붙돼 있었음) local_loss 계보 자체가 제거되면서
+지금은 baseline만 쓴다."""
 
 from __future__ import annotations
 

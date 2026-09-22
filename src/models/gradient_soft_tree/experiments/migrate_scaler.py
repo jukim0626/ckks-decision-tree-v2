@@ -13,7 +13,9 @@ fetch(sklearn 번들 데이터셋이나 OpenML fetch)와 sklearn 버전이 학�
 "명시적 migration"이지 "자동 복구"가 아니다.
 
 사용법: python -m models.gradient_soft_tree.experiments.migrate_scaler <session_dir>
-"""
+
+2026-09-22: local_loss 계보가 제거되면서 이 도구가 다루는 건 baseline/packed가 쓰는
+leaf_logits 파라미터 스키마 하나뿐이다(예전엔 local_logits 스키마도 구분해서 다뤘음)."""
 
 from __future__ import annotations
 
@@ -23,12 +25,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from core.data.dataset import fit_scaler, resolve_leaf_family_test_size, save_scaler, split_dataset_subset  # noqa: E402
-
-
-def _looks_like_local_loss_family(params_dir: Path) -> bool:
-    """params_dir 파일명 규칙으로 계열을 구분한다(설정값이 아니라 실제 파일로 확인) -
-    baseline/packed/opt는 leaf_{l}.ct, local_loss는 local_{level}_{k}.ct를 쓴다."""
-    return any(params_dir.glob("local_*.ct")) and not any(params_dir.glob("leaf_*.ct"))
 
 
 def main() -> None:
@@ -45,18 +41,10 @@ def main() -> None:
     dataset_name = config["dataset_name"]
     n_features = config["n_features"]
     max_train = config.get("max_train")
-    params_dir = session_dir / "params"
 
-    is_local_loss = _looks_like_local_loss_family(params_dir)
-    if is_local_loss:
-        test_size = config.get("test_size", 0.2)
-        family = "local_loss(local_logits)"
-    else:
-        test_size = resolve_leaf_family_test_size(config)
-        family = "baseline/packed/opt(leaf_logits)"
-
+    test_size = resolve_leaf_family_test_size(config)
     print(
-        f"[migrate_scaler] session={session_dir} dataset={dataset_name} family={family} "
+        f"[migrate_scaler] session={session_dir} dataset={dataset_name} "
         f"test_size={test_size} max_train={max_train}"
     )
     print(
