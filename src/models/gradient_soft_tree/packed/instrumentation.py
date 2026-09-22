@@ -1,9 +1,14 @@
 """packed 학습(joint training, vanilla GD)의 forward/backward/parameter-update를
-계측하기 위한 도구. `opt/engine_counter.py`(CountingEngineProxy)와
-`opt/profiler.py`(BootstrapProfiler)의 아이디어를 재사용하되, 이번 최적화 작업이
-요구하는 지표(ct-ct vs ct-pt multiply 구분, merge_bootstrap 카운트, refresh된
-ciphertext 개수, phase별 GPU-sync 기반 wall time)에 맞게 확장했다. baseline/opt의
-기존 계측 코드는 건드리지 않는다(별도 모듈).
+계측하기 위한 도구.
+
+`CountingEngineProxy`/`PhaseTimer`는 이번 최적화 작업이 요구하는 지표(ct-ct vs ct-pt
+multiply 구분, merge_bootstrap 카운트, refresh된 ciphertext 개수, phase별 GPU-sync
+기반 wall time)를 위해 새로 작성했다.
+
+`BootstrapProfiler`/`ensure_level_profiled`/`batch_ensure_level_profiled`는 2026-09-22
+opt 계보 제거 때 `opt/profiler.py`에서 그대로(로직 변경 없이) 옮겨왔다 - opt의 TreeConfig
+실험(현재 지원 범위 밖)과는 무관하게 이 세 가지는 범용 bootstrap 태깅/집계 도구라 packed
+계측에 그대로 재사용할 수 있다.
 
 **GPU 비동기 실행에 대한 조사 결과 (2026-09-21)**: 설치된 `desilofhe-cu130==1.14.1`의
 `Engine`에 인자 없는 `sync() -> None` 메서드가 있다. `Engine(mode="cpu")`에서
@@ -26,6 +31,8 @@ wall-clock 측정이 신뢰할 만함)일 가능성이 있지만, 이건 **추�
 
 from __future__ import annotations
 
+import csv
+import json
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -175,8 +182,191 @@ def params_dir_total_bytes(params_dir: Path) -> int:
 
 
 def append_measurement_jsonl(path: Path, measurement: EpochMeasurement) -> None:
-    import json
-
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a") as f:
         f.write(json.dumps(measurement.to_dict()) + "\n")
+
+
+# ---- 2026-09-22: opt/profiler.py에서 로직 변경 없이 이동(opt 계보 제거) ----
+# tag별 bootstrap 이벤트(호출 전/후 level, 소요시간) 기록 + merge_bootstrap 페어링
+# helper. Phase 5A/5B(opt 실험)가 원래 목적이었지만 이 세 가지 자체는 TreeConfig와
+# 무관한 범용 bootstrap 계측이라 packed에 그대로 재사용한다.
+
+CATEGORIES = [
+    "sigmoid_forward", "attention_softmax", "leaf_softmax", "routing_forward",
+    "loss", "backward_leaf", "backward_threshold", "backward_attention",
+    "parameter_update", "other",
+]
+
+
+@dataclass
+class BootstrapEvent:
+    tag: str
+    level_before: int
+    level_after: int
+    elapsed_s: float
+    seq: int
+
+
+@dataclass
+class BootstrapProfiler:
+    detailed: bool = False
+    events: list = field(default_factory=list)
+    all_checks: list = field(default_factory=list)
+    _seq: int = 0
+    _t_start: float = field(default_factory=time.time)
+
+    def record(self, tag: str, level_before: int, level_after: int, elapsed_s: float) -> None:
+        self._seq += 1
+        ev = BootstrapEvent(tag=tag, level_before=level_before, level_after=level_after, elapsed_s=elapsed_s, seq=self._seq)
+        self.events.append(ev)
+        if self.detailed:
+            print(
+                f"[bootstrap #{self._seq:03d}] tag={tag:<22} level {level_before} -> {level_after}  "
+                f"elapsed={elapsed_s:.3f}s",
+                flush=True,
+            )
+
+    def trace(self, msg: str) -> None:
+        if self.detailed:
+            print(f"[trace] {msg}", flush=True)
+
+    def summary(self) -> dict:
+        by_cat = defaultdict(lambda: {"count": 0, "total_time": 0.0, "levels_before": [], "levels_after": []})
+        for ev in self.events:
+            d = by_cat[ev.tag]
+            d["count"] += 1
+            d["total_time"] += ev.elapsed_s
+            d["levels_before"].append(ev.level_before)
+            d["levels_after"].append(ev.level_after)
+        out = {}
+        for tag, d in by_cat.items():
+            n = d["count"]
+            out[tag] = {
+                "count": n,
+                "total_time_s": d["total_time"],
+                "avg_time_s": d["total_time"] / n if n else 0.0,
+                "avg_level_before": sum(d["levels_before"]) / n if n else 0.0,
+                "avg_level_after": sum(d["levels_after"]) / n if n else 0.0,
+            }
+        return out
+
+    def print_summary(self) -> None:
+        s = self.summary()
+        total_count = sum(v["count"] for v in s.values())
+        total_time = sum(v["total_time_s"] for v in s.values())
+        wall = time.time() - self._t_start
+        print("\nBootstrap Profile")
+        print(f"{'category':<22}{'count':>7}{'total_s':>10}{'avg_s':>8}{'lvl_before':>12}{'lvl_after':>11}")
+        for tag in CATEGORIES:
+            if tag not in s:
+                continue
+            v = s[tag]
+            print(
+                f"{tag:<22}{v['count']:>7}{v['total_time_s']:>10.1f}{v['avg_time_s']:>8.2f}"
+                f"{v['avg_level_before']:>12.1f}{v['avg_level_after']:>11.1f}"
+            )
+        for tag, v in s.items():
+            if tag not in CATEGORIES:
+                print(
+                    f"{tag:<22}{v['count']:>7}{v['total_time_s']:>10.1f}{v['avg_time_s']:>8.2f}"
+                    f"{v['avg_level_before']:>12.1f}{v['avg_level_after']:>11.1f}"
+                )
+        print(f"{'TOTAL':<22}{total_count:>7}{total_time:>10.1f}")
+        print(f"(wall time so far: {wall:.1f}s, bootstrap share: {100.0 * total_time / wall:.1f}%)")
+
+    def to_json(self, path: Path) -> None:
+        path.write_text(json.dumps({"summary": self.summary(), "n_events": len(self.events)}, indent=2))
+
+    def events_to_csv(self, path: Path) -> None:
+        with open(path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["seq", "tag", "level_before", "level_after", "elapsed_s"])
+            for ev in self.events:
+                w.writerow([ev.seq, ev.tag, ev.level_before, ev.level_after, f"{ev.elapsed_s:.4f}"])
+
+    def checks_summary(self) -> dict:
+        by_tag = defaultdict(lambda: {"n": 0, "n_triggered": 0, "levels": []})
+        for tag, level, triggered in self.all_checks:
+            d = by_tag[tag]
+            d["n"] += 1
+            d["n_triggered"] += int(triggered)
+            d["levels"].append(level)
+        out = {}
+        for tag, d in by_tag.items():
+            levels = d["levels"]
+            out[tag] = {
+                "n_checks": d["n"],
+                "n_triggered": d["n_triggered"],
+                "trigger_rate": d["n_triggered"] / d["n"] if d["n"] else 0.0,
+                "level_min": min(levels) if levels else None,
+                "level_mean": sum(levels) / len(levels) if levels else None,
+                "level_max": max(levels) if levels else None,
+            }
+        return out
+
+    def checks_to_csv(self, path: Path) -> None:
+        with open(path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["tag", "level_before", "triggered"])
+            for tag, level, triggered in self.all_checks:
+                w.writerow([tag, level, int(triggered)])
+
+
+def batch_ensure_level_profiled(ctx, items: list, min_level: int, profiler: "BootstrapProfiler | None"):
+    """merge_bootstrap 페어링 패턴(2개씩 묶어 한 번에 복구, 홀수면 마지막 하나만 단독
+    bootstrap) + tag/시간 profiling. items: [(ciphertext, tag), ...]. 반환은 같은
+    순서의 새 ciphertext 리스트."""
+    result = [ctx.engine.intt(ct) for ct, _tag in items]
+    tags = [tag for _ct, tag in items]
+    needs_refresh = [i for i, ct in enumerate(result) if ct.level < min_level]
+    i = 0
+    while i < len(needs_refresh):
+        if i + 1 < len(needs_refresh):
+            idx1, idx2 = needs_refresh[i], needs_refresh[i + 1]
+            level_before = min(result[idx1].level, result[idx2].level)
+            t0 = time.time()
+            r1, r2 = ctx.engine.merge_bootstrap(
+                result[idx1], result[idx2], ctx.rlk, ctx.conjugation_key, ctx.rotation_key, ctx.small_bootstrap_key
+            )
+            elapsed = time.time() - t0
+            result[idx1], result[idx2] = ctx.engine.intt(r1), ctx.engine.intt(r2)
+            if profiler is not None:
+                profiler.record(f"{tags[idx1]}|{tags[idx2]}_merged", level_before, result[idx1].level, elapsed)
+            i += 2
+        else:
+            idx = needs_refresh[i]
+            level_before = result[idx].level
+            t0 = time.time()
+            refreshed = ctx.engine.bootstrap(
+                result[idx], ctx.rlk, ctx.conjugation_key, ctx.rotation_key, ctx.small_bootstrap_key
+            )
+            elapsed = time.time() - t0
+            result[idx] = ctx.engine.intt(refreshed)
+            if profiler is not None:
+                profiler.record(f"{tags[idx]}_solo", level_before, result[idx].level, elapsed)
+            i += 1
+    return result
+
+
+def ensure_level_profiled(ctx, ct, tag: str, min_level: int, profiler: "BootstrapProfiler | None"):
+    """core.ckks_engine.ensure_level()과 완전히 동일한 로직(intt 정규화 + min_level
+    guard) + tag가 붙은 profiler 기록."""
+    level_before = ct.level
+    triggered = ct.level < min_level
+    if profiler is not None:
+        profiler.trace(f"{tag} input level: {level_before}")
+        profiler.all_checks.append((tag, level_before, triggered))
+    if triggered:
+        ct = ctx.engine.intt(ct)
+        t0 = time.time()
+        refreshed = ctx.engine.bootstrap(
+            ct, ctx.rlk, ctx.conjugation_key, ctx.rotation_key, ctx.small_bootstrap_key
+        )
+        elapsed = time.time() - t0
+        result = ctx.engine.intt(refreshed)
+        if profiler is not None:
+            profiler.record(tag, level_before, result.level, elapsed)
+            profiler.trace(f"{tag} output level: {result.level}")
+        return result
+    return ct
