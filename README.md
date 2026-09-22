@@ -33,15 +33,21 @@ src/
 │
 └── models/
     └── gradient_soft_tree/
-        ├── gate.py                # shared gate computation (baseline + local_loss)
-        ├── params.py              # shared alpha/threshold/leaf_logits(local_logits) ciphertext I/O
-        ├── baseline/              # gradient-descent soft tree, verified for depth 1-3
-        ├── opt/                   # bootstrap-count reduction experiments
-        ├── packed/                # feature-axis SIMD packing (~26x speedup on a depth-3 tree)
-        ├── local_loss/            # per-level local-loss training (depth-independent backward depth)
+        ├── gate.py                # baseline's axis-aligned attention-blend gate computation
+        ├── params.py              # shared alpha/threshold/leaf_logits ciphertext I/O
+        ├── plaintext_softmax.py   # plaintext (numpy) softmax used by reference implementations
+        ├── baseline/              # gradient-descent soft tree, verified for depth 1-3 (comparison baseline)
+        ├── packed/                # feature-axis SIMD packing (~26x speedup on a depth-3 tree) - current focus
         ├── tests/                 # automated pass/fail checks (CPU-only, no GPU needed)
-        └── experiments/           # manual diagnostics, sweeps, and one-off migration tools
+        └── experiments/           # manual diagnostics and legacy-session migration tools
 ```
+
+Current research focus is **joint training on the `packed` path** (single leaf loss backpropagated
+through the whole tree, vanilla gradient descent) - `baseline` is kept only as the plaintext/CKKS
+comparison reference it has always been. Two earlier lineages (`local_loss`, a per-level local-loss
+training variant, and `opt`, a set of bootstrap-count-reduction ablations) were explored and are no
+longer supported; their code was removed rather than kept around unused. Both are still reachable in
+git history (tag `pre-cleanup-packed-joint-optim`) if needed again.
 
 ## Setup
 
@@ -61,13 +67,16 @@ python -m models.gradient_soft_tree.baseline.train <dataset> <depth> <epochs> <l
 # example
 python -m models.gradient_soft_tree.baseline.train iris 3 35 2.0 0 17
 
-# feature-axis SIMD packing
+# feature-axis SIMD packing (current focus)
 python -m models.gradient_soft_tree.packed.train <dataset> <depth> <epochs> <lr> <seed> <level_preset>
+# genuine encrypted inference on a trained session (never decrypts the model, only the final score)
+python -m models.gradient_soft_tree.packed.predict_packed <session_dir>
 
-# automated checks (models/gradient_soft_tree/tests/) - test_block_ops/test_block_packed_softmax
-# need a CKKS engine (CPU mode, no GPU required); grad_check is pure numpy
-python -m models.gradient_soft_tree.tests.test_block_ops
-python -m models.gradient_soft_tree.tests.grad_check
+# automated checks (models/gradient_soft_tree/tests/)
+python -m models.gradient_soft_tree.tests.grad_check           # pure numpy, no CKKS
+python -m models.gradient_soft_tree.tests.test_block_ops       # CPU-mode CKKS engine, no GPU needed
+python -m models.gradient_soft_tree.tests.test_block_packed_softmax
+python -m models.gradient_soft_tree.tests.test_packed_vs_plaintext <dataset> <depth> <epochs> <lr>  # GPU only
 ```
 
 `<dataset>` is one of `iris`, `wine`, `breast_cancer`, `digits`, `diabetes`.
