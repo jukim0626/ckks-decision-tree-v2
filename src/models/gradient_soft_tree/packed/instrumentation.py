@@ -10,24 +10,23 @@ opt 계보 제거 때 `opt/profiler.py`에서 그대로(로직 변경 없이) �
 실험(현재 지원 범위 밖)과는 무관하게 이 세 가지는 범용 bootstrap 태깅/집계 도구라 packed
 계측에 그대로 재사용할 수 있다.
 
-**GPU 비동기 실행에 대한 조사 결과 (2026-09-21)**: 설치된 `desilofhe-cu130==1.14.1`의
-`Engine`에 인자 없는 `sync() -> None` 메서드가 있다. `Engine(mode="cpu")`에서
-`.sync()`를 실제로 호출해보니 `RuntimeError: Engine is not in Async GPU mode`가
-났다 - **CPU 모드는 확실히 동기 실행**이라는 게 실측으로 확인됐다. 그런데
-`Engine.__init__`의 오버로드 시그니처 어디에도 "async 모드로 만들어라"는 명시적
-인자가 없다(`mode` 문자열 하나뿐, 유효한 값 목록은 help()에 안 나옴) - 이 프로젝트가
-실제로 쓰는 `mode="gpu"`(`core/ckks_engine.py`)가 동기인지 비동기인지는 **GPU에서
-직접 `Engine(mode="gpu").sync()`를 호출해봐야 확정 가능하다 - 아직 GPU를 확보 못해
-미확인**. 에러 메시지가 "Async GPU mode가 아니다"라고 구체적으로 말하는 걸 보면
-"Async GPU mode"라는 게 존재는 하되 `mode="gpu"`(sync)와는 다른 별도 모드일
-가능성이 있다 - 즉 이 프로젝트가 쓰는 기본 gpu 모드는 이미 동기(=지금까지의
-wall-clock 측정이 신뢰할 만함)일 가능성이 있지만, 이건 **추정이지 확정이 아니다**.
+**GPU 비동기 실행 여부 - 확정됨 (2026-09-27, GPU에서 직접 실측)**: 설치된
+`desilofhe-cu130==1.14.1`의 `Engine`에 인자 없는 `sync() -> None` 메서드가 있다.
+2026-09-21에는 CPU 모드(`Engine(mode="cpu")`)에서만 `RuntimeError: Engine is not
+in Async GPU mode`를 확인했고 `mode="gpu"`는 미확인이었는데, 2026-09-27 실제 GPU
+엔진(`create_bootstrap_context(mode="gpu", level_preset=17)`)에서 `.sync()`를 직접
+호출해본 결과 **`mode="gpu"`도 똑같이 `RuntimeError: Engine is not in Async GPU
+mode`를 낸다 - 이 프로젝트가 쓰는 gpu 모드는 동기 실행이 확정**됐다. 즉 지금까지
+(이번 세션 전체, opt/profiler.py 시절 포함) `time.time()`으로 잰 wall-clock
+측정치들은 전부 신뢰할 수 있다 - 별도 sync 없이도 각 engine 호출이 실제로 끝날
+때까지 블록한다.
 
-`PhaseTimer`는 이 불확실성에 안전하게 대응한다: `sync()`가 있으면 불러보되
-"Async GPU mode가 아님" RuntimeError는 잡아서 "이미 동기 모드라 sync 불필요"로
-해석하고 넘어간다(다른 종류의 예외는 그대로 전파). `sync_available`/`sync_error`
-필드에 실제로 어떤 경로를 탔는지 기록해서, 보고할 때 "동기화가 실제로 적용된
-측정인지 추정인지"를 구분할 수 있게 한다."""
+`PhaseTimer`는 그래도 안전하게 동작한다: `sync()`가 있으면 불러보되 "Async GPU
+mode가 아님" RuntimeError는 잡아서 "이미 동기 모드라 sync 불필요"로 해석하고
+넘어간다(다른 종류의 예외는 그대로 전파). `sync_available`/`sync_actually_worked`
+필드에 실제로 어떤 경로를 탔는지 기록한다(이 프로젝트에서는 두 값 다 True/False로
+"이미 동기라 sync 불필요"를 나타내는 게 정상 - Async 모드를 쓸 계획이 없는 한
+`sync_actually_worked=False`가 오류가 아니라 기대값이다)."""
 
 from __future__ import annotations
 
