@@ -5,9 +5,13 @@ baseline과 완전히 동일하므로 `setup_worker_N.py`를 그대로 재사용
 
 이 파일만 packed 전용인 이유: `forward_backward_update_N_packed`를 부르려면
 blocked_features/sample_mask_blocked/block_masks/block_size가 필요한데, 전부 (1) dataset/
-sample_mask(이미 session_dir에 저장돼 setup_worker_N.py가 만들어둠)의 순수 함수이고 (2)
-계산 비용이 싸므로(rotation만, bootstrap 없음) 매 epoch_worker_packed 프로세스 시작 시
-새로 계산한다 - 별도로 직렬화/로드할 필요가 없다."""
+n_samples(config.json에 이미 공개된 값)의 순수 함수이고 (2) 계산 비용이 싸므로(rotation만,
+bootstrap 없음) 매 epoch_worker_packed 프로세스 시작 시 새로 계산한다 - 별도로 직렬화/로드할
+필요가 없다.
+
+**2026-09-28 Step 2**: setup_worker_N.py가 `session_dir/sample_mask.ct`를 여전히 만들지만
+(baseline 전용, 변경 없음) packed는 이제 이 파일을 읽지 않는다 - n_samples가 이미
+config.json에 공개돼 있어 `block_ops.sample_mask_plain`으로 plaintext를 즉석에서 만든다."""
 
 from __future__ import annotations
 
@@ -22,10 +26,11 @@ from core.ckks_engine import create_bootstrap_engine  # noqa: E402
 from core.runtime.gpu import GpuPeakWatcher  # noqa: E402
 from models.gradient_soft_tree.packed.block_ops import (  # noqa: E402
     assert_layout_fits,
-    broadcast_full_to_blocks,
     build_block_masks,
     compute_block_size,
     pack_dataset_features_blocked,
+    sample_mask_blocked_plain,
+    sample_mask_plain,
 )
 from models.gradient_soft_tree.packed.instrumentation import (  # noqa: E402
     CountingEngineProxy,
@@ -79,13 +84,17 @@ def main() -> None:
         n_classes=config["n_classes"],
         n_samples=config["n_samples"],
     )
-    sample_mask = engine.read_ciphertext(session_dir / "sample_mask.ct")
+    # 2026-09-28: Step 2 - n_samples는 config.json에 이미 공개돼 있어 sample_mask를
+    # ciphertext로 저장/로드할 필요가 없다(baseline/setup_worker.py가 만든
+    # sample_mask.ct는 baseline 전용 - packed는 이제 사용하지 않는다). 값/적용 위치는
+    # 기존 ciphertext 버전과 동일, plaintext(numpy 배열)로 직접 구성.
+    sample_mask = sample_mask_plain(dataset.n_samples, engine.slot_count)
 
     block_size = compute_block_size(dataset.n_samples)
     assert_layout_fits(n_features, block_size, engine.slot_count)
     block_masks = build_block_masks(n_features, block_size, engine.slot_count)
     blocked_features = pack_dataset_features_blocked(ctx, dataset.enc_features, block_size)
-    sample_mask_blocked = broadcast_full_to_blocks(ctx, sample_mask, n_features, block_size)
+    sample_mask_blocked = sample_mask_blocked_plain(dataset.n_samples, n_features, block_size, engine.slot_count)
 
     params_dir = session_dir / "params"
     params = {

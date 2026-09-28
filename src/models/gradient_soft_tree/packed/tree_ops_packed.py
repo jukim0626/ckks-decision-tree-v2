@@ -16,7 +16,14 @@ level 전파)는 baseline과 완전히 동일 - 자세한 설계 근거는
 `pack_threshold_blocked`로 packing했다가, 갱신 후 `_extract_weight_broadcast`로 다시
 feature별로 꺼낸다. 이러면 `init_encrypted_params_N`/`decrypt_params_N`(baseline 그대로
 재사용)과 params dict 모양이 완전히 같아서 I/O 계약이 단순해진다 - threshold를 완전히
-packed 포맷으로 옮기는 건 독립적인 후속 최적화로 미룬다."""
+packed 포맷으로 옮기는 건 독립적인 후속 최적화로 미룬다.
+
+**2026-09-28**: `sample_mask`/`sample_mask_blocked` 인자는 더 이상 ciphertext가 아니라
+plaintext(numpy 배열)다 - n_samples가 이미 config.json에 공개돼 있어 암호화해서 들고 다닐
+필요가 없다(packed/block_ops.py의 `sample_mask_plain`/`sample_mask_blocked_plain` 참고).
+마스크 값/적용 위치/곱하는 시점은 전부 그대로이고, 해당 multiply 호출들만 `ctx.rlk`가
+빠졌다(ct×ct에서 ct×plaintext로) - level 소비량은 동일함을 실측 확인(17->16, ct×ct와
+같음), relinearization만 없어진다."""
 
 from __future__ import annotations
 
@@ -244,7 +251,7 @@ def forward_backward_update_N_packed(
         g_l = None
         for c in range(n_classes):
             term = ctx.engine.multiply(dL_dyhat[c], leaf_probs[l], ctx.rlk)
-            term = ctx.engine.multiply(term, sample_mask, ctx.rlk)
+            term = ctx.engine.multiply(term, sample_mask)  # 2026-09-28: plaintext mask, rlk 불필요
             term = ctx.engine.intt(term)
             s = _ensure_level(ctx, ctx.engine.sum(term, ctx.rotation_key))
             piece = scatter_to_slot(ctx, s, c)
@@ -298,13 +305,13 @@ def forward_backward_update_N_packed(
             # 어긋났다 - feature별 diff가 rotation 여부와 무관하게 전부 똑같았던 게 결정적
             # 단서). gate는 gate_j가 이미 extract_block_to_full에서 sample_mask로 마스킹되니
             # clean해서 이 마스킹이 필요 없다 - dL_dgate_i만 여기서 명시적으로 마스킹한다.
-            dL_dgate_i_masked = ctx.engine.multiply(dL_dgate_i, sample_mask, ctx.rlk)
+            dL_dgate_i_masked = ctx.engine.multiply(dL_dgate_i, sample_mask)  # 2026-09-28: plaintext mask, rlk 불필요
             dL_dgate_i_blocked = broadcast_full_to_blocks(ctx, dL_dgate_i_masked, n_features, block_size)
             gate_broadcast_blocked = broadcast_full_to_blocks(ctx, gate, n_features, block_size)
 
             # threshold gradient: 전체 feature를 한 번에
             prod_t_blocked = ctx.engine.multiply(dL_dgate_i_blocked, surrogate_blocked, ctx.rlk)
-            prod_t_blocked = ctx.engine.multiply(prod_t_blocked, sample_mask_blocked, ctx.rlk)
+            prod_t_blocked = ctx.engine.multiply(prod_t_blocked, sample_mask_blocked)  # 2026-09-28: plaintext mask, rlk 불필요
             prod_t_blocked = ctx.engine.intt(prod_t_blocked)
             sum_t_blocked = block_local_sum(ctx, prod_t_blocked, block_size)
             sum_t_blocked = _ensure_level(ctx, sum_t_blocked)
@@ -323,7 +330,7 @@ def forward_backward_update_N_packed(
 
             # attention gradient: 전체 feature를 한 번에
             term_a_blocked = ctx.engine.multiply(dL_dgate_i_blocked, ctx.engine.subtract(gate_blocked, gate_broadcast_blocked), ctx.rlk)
-            term_a_blocked = ctx.engine.multiply(term_a_blocked, sample_mask_blocked, ctx.rlk)
+            term_a_blocked = ctx.engine.multiply(term_a_blocked, sample_mask_blocked)  # 2026-09-28: plaintext mask, rlk 불필요
             term_a_blocked = ctx.engine.intt(term_a_blocked)
             sum_a_blocked = block_local_sum(ctx, term_a_blocked, block_size)
             sum_a_blocked = _ensure_level(ctx, sum_a_blocked)

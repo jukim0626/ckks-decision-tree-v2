@@ -127,9 +127,11 @@ def main() -> None:
     # enc_diff_blocked = blocked_features - blocked_threshold 흉내: block 전체(패딩 포함)에
     # threshold가 남아있는 상태를 재현해서, extract 후 패딩 슬롯이 정확히 0이 되는지 확인.
     enc_diff_blocked = ctx.engine.subtract(blocked_features, blocked_threshold)
-    sample_mask_vec = [0.0] * slot_count
-    sample_mask_vec[:N_SAMPLES] = [1.0] * N_SAMPLES
-    sample_mask = ctx.engine.encrypt(sample_mask_vec, ctx.pk)
+    # 2026-09-28: sample_mask는 production 코드(extract_block_to_full)와 동일하게
+    # plaintext(numpy 배열)로 넘긴다 - ciphertext를 넘기면 ct×ct multiply가 되어
+    # extract_block_to_full 내부의 rlk 없는 multiply가 이 test에서만 다른 경로를 타게 된다.
+    sample_mask = np.zeros(slot_count)
+    sample_mask[:N_SAMPLES] = 1.0
     for j in range(N_FEATURES):
         extracted = extract_block_to_full(ctx, enc_diff_blocked, j, block_size, sample_mask)
         dec = _dec(ctx, extracted)
@@ -175,9 +177,8 @@ def main_realistic_scale() -> None:
     threshold_cts = [ctx.engine.encrypt([float(thresholds[j])] * slot_count, ctx.pk) for j in range(n_features)]
     blocked_threshold = pack_threshold_blocked(ctx, threshold_cts, block_masks)
     enc_diff_blocked = ctx.engine.subtract(blocked_features, blocked_threshold)
-    sample_mask_vec = [0.0] * slot_count
-    sample_mask_vec[:n_samples] = [1.0] * n_samples
-    sample_mask = ctx.engine.encrypt(sample_mask_vec, ctx.pk)
+    sample_mask = np.zeros(slot_count)
+    sample_mask[:n_samples] = 1.0
     for j in range(n_features):
         extracted = extract_block_to_full(ctx, enc_diff_blocked, j, block_size, sample_mask)
         dec = _dec(ctx, extracted)

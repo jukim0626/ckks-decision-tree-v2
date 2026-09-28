@@ -36,6 +36,7 @@ from models.gradient_soft_tree.packed.block_ops import (  # noqa: E402
     build_block_masks,
     compute_block_size,
     pack_dataset_features_blocked,
+    sample_mask_plain,
 )
 from models.gradient_soft_tree.packed.tree_ops_packed import predict_packed  # noqa: E402
 
@@ -83,7 +84,8 @@ def main() -> None:
     X_test = scaler.transform(X_test_raw)
     y_test_oh = one_hot_encode(y_test, n_classes)  # encrypt_dataset 시그니처상 필요(추론엔 안 씀)
     dataset_test = encrypt_dataset(ctx, X_test, y_test_oh)
-    sample_mask_test = engine.encrypt([1.0] * dataset_test.n_samples, ctx.pk)
+    # 2026-09-28: Step 2 - n_test는 공개 정보이므로 sample_mask를 encrypt할 필요가 없다.
+    sample_mask_test = sample_mask_plain(dataset_test.n_samples, engine.slot_count)
 
     block_size = compute_block_size(dataset_test.n_samples)  # test set 크기 기준 - threshold는 packed 포맷이 아니라서 학습 때 block_size와 달라도 무관
     assert_layout_fits(n_features, block_size, engine.slot_count)

@@ -27,10 +27,11 @@ from models.gradient_soft_tree.baseline.tree_ops import decrypt_params_N, init_e
 from models.gradient_soft_tree.baseline.reference import train_depthN  # noqa: E402
 from models.gradient_soft_tree.packed.block_ops import (  # noqa: E402
     assert_layout_fits,
-    broadcast_full_to_blocks,
     build_block_masks,
     compute_block_size,
     pack_dataset_features_blocked,
+    sample_mask_blocked_plain,
+    sample_mask_plain,
 )
 from models.gradient_soft_tree.packed.tree_ops_packed import forward_backward_update_N_packed  # noqa: E402
 
@@ -39,6 +40,12 @@ from models.gradient_soft_tree.packed.tree_ops_packed import forward_backward_up
 # 여러 항목, 이번 세션의 iris depth=1 반복 실행에서도 0.0017~0.0021) - 그보다 훨씬 넉넉한
 # 값으로 잡아서, 진짜 알고리즘 버그(자릿수가 다른 수준의 오차)만 잡아내고 정상적인 CKKS
 # 노이즈 변동으로는 안 흔들리게 한다.
+#
+# 주의: `train_depthN`(baseline/reference.py)의 gate는 **true sigmoid**
+# (`1/(1+exp(-steepness*x))`)이고, packed CKKS 경로는 15차 Chebyshev 다항식 근사
+# (`sigmoid_approx_enc`)를 쓴다 - 이 test의 max_err는 그러므로 "CKKS 노이즈"뿐 아니라
+# "다항식 근사 대 true sigmoid" 오차도 포함한다. 이 test가 통과한다고 다항식 근사 자체의
+# 정확도까지 검증된 건 아니다(그건 별도로 이미 검증된 전제).
 TOL = 0.05
 
 
@@ -64,14 +71,16 @@ def test_packed_vs_plaintext(dataset_name: str, depth: int, n_epochs: int, lr: f
             f"원인: {exc!r}"
         ) from exc
     dataset = encrypt_dataset(ctx, X_train, y_train_oh)
-    sample_mask = ctx.engine.encrypt([1.0] * dataset.n_samples, ctx.pk)
+    # 2026-09-28: Step 2 - sample_mask는 production 경로(epoch_worker_packed.py)와 동일하게
+    # plaintext로 구성한다(n_samples는 공개 정보).
+    sample_mask = sample_mask_plain(dataset.n_samples, ctx.engine.slot_count)
 
     # --- packing 관련 setup: 데이터셋/epoch과 무관, 여기서 1회만 계산 ---
     block_size = compute_block_size(dataset.n_samples)
     assert_layout_fits(n_features, block_size, ctx.engine.slot_count)
     block_masks = build_block_masks(n_features, block_size, ctx.engine.slot_count)
     blocked_features = pack_dataset_features_blocked(ctx, dataset.enc_features, block_size)
-    sample_mask_blocked = broadcast_full_to_blocks(ctx, sample_mask, n_features, block_size)
+    sample_mask_blocked = sample_mask_blocked_plain(dataset.n_samples, n_features, block_size, ctx.engine.slot_count)
     print(f"[setup] block_size={block_size} (n_features*block_size={n_features * block_size} / slot_count={ctx.engine.slot_count})")
 
     params = init_encrypted_params_N(ctx, n_features, n_classes, depth, seed=seed, slot_count=ctx.engine.slot_count)

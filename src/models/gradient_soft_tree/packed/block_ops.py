@@ -106,9 +106,35 @@ def gather_block_tops_to_packed(ctx, reduced_ct, n_features: int, block_size: in
     return gather_block_tops(ctx, reduced_ct, n_features, block_size, slot_count)
 
 
+def sample_mask_plain(n_samples: int, slot_count: int) -> np.ndarray:
+    """2026-09-28: sample_mask는 학습에 실제 쓰이는 샘플이 몇 개인지(n_samples)를 나타낼
+    뿐이고, n_samples 자체가 이미 session_dir/config.json에 공개돼 있다(config schema에
+    평문으로 저장됨) - 그러니 이 마스크 자체를 암호화해서 들고 다닐 이유가 없다. 슬롯
+    [0,n_samples)=1.0, 나머지=0.0인 plaintext 배열을 그대로 반환한다 - 값과 적용 위치는
+    기존 ciphertext 버전과 완전히 동일, 표현만 plaintext로 바뀐다."""
+    mask = np.zeros(slot_count)
+    mask[:n_samples] = 1.0
+    return mask
+
+
+def sample_mask_blocked_plain(n_samples: int, n_features: int, block_size: int, slot_count: int) -> np.ndarray:
+    """`broadcast_full_to_blocks(ctx, sample_mask_plain(...), n_features, block_size)`와
+    수치적으로 동일한 결과를 CKKS rotate 없이 직접 만든다. sample_mask가 공개 정보이므로
+    그걸 블록마다 복제한 배치도 공개 정보다 - broadcast_full_to_blocks는 이 배치를
+    rotate+add로 "재현"하는 것뿐이라, 애초에 매 block의 [0,n_samples) 구간에 1.0을
+    직접 채우면 같은 배열이 나온다(block끼리 절대 안 겹치는 건 n_features*block_size
+    <=slot_count 전제 - assert_layout_fits가 이미 보장)."""
+    mask = np.zeros(slot_count)
+    for j in range(n_features):
+        mask[j * block_size: j * block_size + n_samples] = 1.0
+    return mask
+
+
 def extract_block_to_full(ctx, blocked_ct, feature_idx: int, block_size: int, sample_mask):
     """block feature_idx(슬롯 [j*B,(j+1)*B))를 슬롯 0 기준 full-width 레이아웃으로 되돌리고,
-    **항상** sample_mask를 곱한다(호출부가 빼먹을 수 없도록 강제).
+    **항상** sample_mask를 곱한다(호출부가 빼먹을 수 없도록 강제). sample_mask는
+    2026-09-28부터 plaintext(numpy 배열) - `ctx.rlk` 없이 ct×plaintext multiply를 쓴다
+    (level 소비는 ct×ct와 동일하게 확인됐지만 relinearization이 필요 없다).
 
     baseline(depthN_ckks.py)의 forward `gate_j = sigmoid_approx_enc(...)`는 마스킹 없이 바로
     `w_j*gate_j` 가중합에 쓰이는데, 그래도 안전한 이유는 baseline의 `enc_feature`가 회전 한
@@ -123,7 +149,7 @@ def extract_block_to_full(ctx, blocked_ct, feature_idx: int, block_size: int, sa
     이미 0.003~0.009 어긋났다 - 마스킹을 되살리자 정상 범위로 돌아옴. rotate(ct,key,shift)[i]
     =ct[i-shift]로 new[i]=old[i+j*B]가 되려면 shift=-j*B."""
     shifted = blocked_ct if feature_idx == 0 else ctx.engine.rotate(blocked_ct, ctx.rotation_key, -feature_idx * block_size)
-    return ctx.engine.multiply(shifted, sample_mask, ctx.rlk)
+    return ctx.engine.multiply(shifted, sample_mask)
 
 
 def broadcast_within_block(ctx, ct, block_size: int):
