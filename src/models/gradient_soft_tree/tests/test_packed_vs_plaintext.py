@@ -28,7 +28,7 @@ from models.gradient_soft_tree.baseline.reference import train_depthN  # noqa: E
 from models.gradient_soft_tree.packed.block_ops import (  # noqa: E402
     assert_layout_fits,
     build_block_masks,
-    compute_block_size,
+    compute_block_size_tight,
     pack_dataset_features_blocked,
     sample_mask_blocked_plain,
     sample_mask_plain,
@@ -76,7 +76,7 @@ def test_packed_vs_plaintext(dataset_name: str, depth: int, n_epochs: int, lr: f
     sample_mask = sample_mask_plain(dataset.n_samples, ctx.engine.slot_count)
 
     # --- packing 관련 setup: 데이터셋/epoch과 무관, 여기서 1회만 계산 ---
-    block_size = compute_block_size(dataset.n_samples)
+    block_size = compute_block_size_tight(dataset.n_samples)  # 2026-09-28 Step 3
     assert_layout_fits(n_features, block_size, ctx.engine.slot_count)
     block_masks = build_block_masks(n_features, block_size, ctx.engine.slot_count)
     blocked_features = pack_dataset_features_blocked(ctx, dataset.enc_features, block_size)

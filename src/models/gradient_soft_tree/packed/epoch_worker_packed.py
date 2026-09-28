@@ -27,7 +27,7 @@ from core.runtime.gpu import GpuPeakWatcher  # noqa: E402
 from models.gradient_soft_tree.packed.block_ops import (  # noqa: E402
     assert_layout_fits,
     build_block_masks,
-    compute_block_size,
+    compute_block_size_tight,
     pack_dataset_features_blocked,
     sample_mask_blocked_plain,
     sample_mask_plain,
@@ -90,7 +90,16 @@ def main() -> None:
     # 기존 ciphertext 버전과 동일, plaintext(numpy 배열)로 직접 구성.
     sample_mask = sample_mask_plain(dataset.n_samples, engine.slot_count)
 
-    block_size = compute_block_size(dataset.n_samples)
+    # 2026-09-28 Step 3: compute_block_size(2x 마진, core.encrypted_ops.block_ops 공유
+    # 기본값)가 아니라 packed 전용 opt-in인 compute_block_size_tight(1x, B=next_pow2
+    # (n_samples))을 쓴다 - block_size는 어떤 param 파일에도 저장되지 않는 순수 매 epoch
+    # 재계산값이라(alpha/threshold/leaf_logits 포맷과 무관) 세션 호환성 문제가 없다.
+    # 안전성 근거: numpy 시뮬레이션 + CPU-mode 실제 CKKS(tests/test_block_ops.py의
+    # main_tight_block_size) 양쪽에서 확인 - block_local_sum의 시작 슬롯 합은 fold 전
+    # sample_mask_blocked 마스킹만 되어 있으면 마진 크기와 무관하게 정확하다(마진은
+    # "시작 슬롯이 아닌 다른 슬롯"의 오염만 막아주는데, 그 슬롯들은 애초에
+    # gather_block_tops_to_packed가 절대 안 읽는다).
+    block_size = compute_block_size_tight(dataset.n_samples)
     assert_layout_fits(n_features, block_size, engine.slot_count)
     block_masks = build_block_masks(n_features, block_size, engine.slot_count)
     blocked_features = pack_dataset_features_blocked(ctx, dataset.enc_features, block_size)

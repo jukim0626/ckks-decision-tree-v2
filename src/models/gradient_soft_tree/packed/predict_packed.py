@@ -34,7 +34,7 @@ from core.ckks_engine import create_bootstrap_engine  # noqa: E402
 from models.gradient_soft_tree.packed.block_ops import (  # noqa: E402
     assert_layout_fits,
     build_block_masks,
-    compute_block_size,
+    compute_block_size_tight,
     pack_dataset_features_blocked,
     sample_mask_plain,
 )
@@ -87,7 +87,10 @@ def main() -> None:
     # 2026-09-28: Step 2 - n_test는 공개 정보이므로 sample_mask를 encrypt할 필요가 없다.
     sample_mask_test = sample_mask_plain(dataset_test.n_samples, engine.slot_count)
 
-    block_size = compute_block_size(dataset_test.n_samples)  # test set 크기 기준 - threshold는 packed 포맷이 아니라서 학습 때 block_size와 달라도 무관
+    # 2026-09-28 Step 3: compute_block_size_tight(1x 마진) - epoch_worker_packed.py와 동일한
+    # 근거(block_size는 저장 안 되는 매 호출 재계산값이라 학습 때와 달라도 무관, 마스킹 후
+    # fold는 마진 크기와 무관하게 정확함을 검증함).
+    block_size = compute_block_size_tight(dataset_test.n_samples)  # test set 크기 기준 - threshold는 packed 포맷이 아니라서 학습 때 block_size와 달라도 무관
     assert_layout_fits(n_features, block_size, engine.slot_count)
     block_masks = build_block_masks(n_features, block_size, engine.slot_count)
     blocked_features_test = pack_dataset_features_blocked(ctx, dataset_test.enc_features, block_size)

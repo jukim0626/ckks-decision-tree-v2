@@ -49,6 +49,29 @@ from core.encrypted_ops.block_ops import (  # noqa: E402
     gather_block_tops,
     scatter_to_blocks,
 )
+from core.encrypted_ops.slot_packing import next_power_of_two  # noqa: E402
+
+
+def compute_block_size_tight(n_samples: int) -> int:
+    """2026-09-28 Step 3: `compute_block_size`(공유 기본값, B=next_pow2(2*n_samples))보다
+    작은 B=next_pow2(n_samples)를 쓰는 packed 전용 opt-in - `core.encrypted_ops.block_ops`의
+    공유 기본값은 그대로 두고 이 파일에만 새 함수를 추가한다(다른 경로에 영향 없음).
+
+    **왜 B/2>=n_samples 마진이 없어도 안전한가**: `block_local_sum`의 doubling
+    rotate-add fold(거리 1,2,4,...,B/2)는 시작 슬롯(j*B)에서 정확히 자기 block 폭
+    [j*B,(j+1)*B) 만큼의 forward window 합이 된다 - block 경계와 정확히 맞아떨어지므로
+    이웃 block 데이터가 섞일 여지 자체가 없다(마진 크기와 무관, 순수하게 "window 크기=
+    block 크기"라는 정렬에서 나오는 성질). 마진이 실제로 막아주는 건 "시작 슬롯이 아닌
+    다른 슬롯"의 오염(그건 원래도 `gather_block_tops`가 시작 슬롯만 골라 쓰므로 절대
+    안 읽힘)과 "같은 block 안"의 padding 오염(threshold broadcast 등으로 패딩 영역이
+    0이 아닌 경우) - 이건 production 코드가 fold 직전에 항상 `sample_mask_blocked`로
+    마스킹하므로(코드 감사로 확인) 마진과 무관하게 이미 제거된다. 2026-09-28
+    numpy 시뮬레이션(non-power-of-two n_samples, n_samples가 정확히 2의 거듭제곱이라
+    padding=0인 극단, n_features*block_size==slot_count로 마지막 block이 끝까지 꽉 차는
+    wraparound 경계, 13-feature 규모)에서 전부 시작 슬롯 오차가 부동소수점 수준(~1e-15)임을
+    확인했고, CPU-mode 실제 CKKS로도 `test_block_ops.py`의 `main_tight_block_size`가
+    같은 걸 재확인한다."""
+    return next_power_of_two(n_samples)
 
 
 def assert_layout_fits(n_features: int, block_size: int, slot_count: int) -> None:

@@ -22,6 +22,7 @@ from models.gradient_soft_tree.packed.block_ops import (  # noqa: E402
     broadcast_full_to_blocks,
     build_block_masks,
     compute_block_size,
+    compute_block_size_tight,
     extract_block_to_full,
     gather_block_tops_to_packed,
     pack_dataset_features_blocked,
@@ -189,6 +190,80 @@ def main_realistic_scale() -> None:
     print("\nwine 규모 self-test 통과.")
 
 
+def _run_tight_block_size_case(label: str, n_features: int, n_samples: int) -> None:
+    """2026-09-28 Step 3: `compute_block_size_tight`(B=next_pow2(n_samples), 기존
+    `compute_block_size`의 next_pow2(2*n_samples)보다 작음)로도 `block_local_sum`의 시작
+    슬롯 합이 정확한지 실제 CKKS(CPU mode)로 확인한다 - numpy 시뮬레이션(step3_blocksize_sim.py,
+    이 세션에서 사전 검증 완료)이 예측한 대로라면, production 패턴(threshold류 own-block
+    오염 -> sample_mask_blocked로 마스킹 -> block_local_sum -> gather)에서 마진 크기와
+    무관하게 시작 슬롯 값이 정확해야 한다. `n_samples`가 정확히 2의 거듭제곱이면
+    block_size==n_samples(패딩=0인 극단)가 되는 것도 이 함수로 같이 검증한다."""
+    block_size = compute_block_size_tight(n_samples)
+    slot_count = 128
+    print(f"\n[tight block_size: {label}] n_features={n_features} n_samples={n_samples} "
+          f"block_size={block_size} (기존 compute_block_size였다면 {compute_block_size(n_samples)})")
+    assert_layout_fits(n_features, block_size, slot_count)
+    ctx = _make_engine(slot_count)
+    block_masks = build_block_masks(n_features, block_size, slot_count)
+
+    rng = np.random.default_rng(42)
+    feature_vals = rng.normal(0, 1, size=(n_features, n_samples))
+    enc_features = []
+    for j in range(n_features):
+        vec = [0.0] * slot_count
+        vec[:n_samples] = feature_vals[j].tolist()
+        enc_features.append(ctx.engine.encrypt(vec, ctx.pk))
+    blocked_features = pack_dataset_features_blocked(ctx, enc_features, block_size)
+    dec = _dec(ctx, blocked_features)
+    expected = np.zeros(slot_count)
+    for j in range(n_features):
+        expected[j * block_size: j * block_size + n_samples] = feature_vals[j]
+    _check(f"[tight {label}] pack_dataset_features_blocked", dec, expected)
+
+    # production의 threshold-broadcast급 own-block 오염을 흉내: 각 block의 padding 영역에
+    # 일부러 큰 값을 채운 뒤, sample_mask_blocked로 마스킹하고 fold한다(마스킹 없으면
+    # 시작 슬롯 값이 오염된다는 걸 별도로 numpy 시뮬레이션에서 이미 확인했으므로 여기서는
+    # "마스킹 후" 경로만 실제 CKKS로 재확인).
+    threshold_vals = rng.normal(0, 1, size=n_features)
+    threshold_cts = [ctx.engine.encrypt([float(threshold_vals[j])] * slot_count, ctx.pk) for j in range(n_features)]
+    blocked_threshold = pack_threshold_blocked(ctx, threshold_cts, block_masks)
+    contaminated = ctx.engine.subtract(blocked_features, blocked_threshold)  # padding 영역은 0-threshold_j
+
+    sample_mask = np.zeros(slot_count)
+    sample_mask[:n_samples] = 1.0
+    sample_mask_blocked = np.zeros(slot_count)  # Step 2와 동일하게 plaintext로 직접 구성
+    for j in range(n_features):
+        sample_mask_blocked[j * block_size: j * block_size + n_samples] = 1.0
+    masked = ctx.engine.multiply(contaminated, sample_mask_blocked)
+    reduced = block_local_sum(ctx, masked, block_size)
+    gathered = gather_block_tops_to_packed(ctx, reduced, n_features, block_size, slot_count)
+    dec_gathered = _dec(ctx, gathered)
+    # contaminated = features - threshold이므로 마스킹 후 합은 (feature 합 - n_samples*threshold_j)
+    expected_sums = feature_vals.sum(axis=1) - n_samples * threshold_vals
+    _check(f"[tight {label}] block_local_sum(마스킹 후)+gather 시작슬롯 합", dec_gathered[:n_features], expected_sums)
+
+    # extract_block_to_full: 이웃 block/feature 오염 없이 real region만 정확히 복원되는지
+    for j in range(n_features):
+        extracted = extract_block_to_full(ctx, contaminated, j, block_size, sample_mask)
+        dec = _dec(ctx, extracted)
+        expected_real = feature_vals[j] - threshold_vals[j]
+        _check(f"[tight {label}] extract_block_to_full feature{j} (real region)", dec[:n_samples], expected_real)
+        if n_samples < block_size:
+            _check(f"[tight {label}] extract_block_to_full feature{j} (padding zeroed)", dec[n_samples:block_size], np.zeros(block_size - n_samples))
+
+    print(f"[tight {label}] 통과 (block_size={block_size}, 기존 대비 {compute_block_size(n_samples)/block_size:.1f}배 축소)")
+
+
+def main_tight_block_size() -> None:
+    """Step 3 opt-in(`compute_block_size_tight`)이 실제 CKKS(CPU mode)에서도 안전한지
+    확인 - non-power-of-two n_samples와, n_samples가 정확히 2의 거듭제곱이라 padding이
+    0이 되는 극단 케이스를 모두 돈다."""
+    _run_tight_block_size_case("non-power-of-two", n_features=4, n_samples=6)
+    _run_tight_block_size_case("padding=0 극단", n_features=4, n_samples=8)
+    print("\ntight block_size self-test 전부 통과.")
+
+
 if __name__ == "__main__":
     main()
     main_realistic_scale()
+    main_tight_block_size()
