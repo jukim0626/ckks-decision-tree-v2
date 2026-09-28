@@ -31,6 +31,8 @@ import gc
 import sys
 from pathlib import Path
 
+import numpy as np
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from core.approximation.sigmoid import sigmoid_approx_enc  # noqa: E402
 from core.ckks_engine import ensure_level  # noqa: E402
@@ -39,11 +41,15 @@ from core.encrypted_ops.slot_packing import extract_weight_broadcast as _extract
 from core.approximation.sigmoid import STEEPNESS  # noqa: E402
 from core.encrypted_ops.softmax import packed_softmax, softmax_backward_packed  # noqa: E402
 from models.gradient_soft_tree.packed.block_ops import (  # noqa: E402
+    assert_layout_fits,
     block_local_sum,
+    block_packed_softmax,
     broadcast_full_to_blocks,
+    compute_block_size_tight,
     extract_block_to_full,
     gather_block_tops_to_packed,
     pack_threshold_blocked,
+    scatter_to_blocks,
 )
 
 # depthN_ckks.py의 _LOCAL_MIN_LEVEL과 동일 이유/값 - baseline과 정확히 비교 가능해야 하므로
@@ -70,10 +76,83 @@ def _ensure_level(ctx, ct):
 # 일부러 안 함)."""
 
 
-def _node_gate_packed(ctx, alpha_i, threshold_i: list, blocked_features, block_masks: list, block_size: int, sample_mask, n_features: int, n_pow2_f: int):
+# 2026-09-28 Step 5: 실측(실제 GPU, level_preset=17, depth=1/2/3 전체 학습 - 순수 softmax
+# 격리 벤치마크가 아니라 forward+backward 전체 파이프라인) 기준 **잠정** 기본값.
+#   - count=1,2: 격리 벤치마크에서는 배치가 중립~우세였지만, 실제 전체 학습(depth=1,
+#     node count=1 + leaf count=2)에 넣으면 오히려 +35% 느려졌다 - block_packed_softmax의
+#     extract_block_to_full이 결과를 개별 packed_softmax 대비 level을 2단 더 소모한 채로
+#     내놓는 게 원인으로 보이지만(레벨 8 vs 10, 직접 확인함), 이게 왜 뒤따르는 파이프라인
+#     전체에 예상보다 큰 시간 손해로 이어지는지는 아직 완전히 규명 못 했다.
+#   - count=3: 별도로 측정하지 않았다 - "손해가 확인됨"이 아니라 "확인 안 됐으니 보수적으로
+#     기존 방식을 쓴다"는 결정이다.
+#   - count>=4: depth=2(-24.0%)/depth=3(-23.8%) 전체 학습에서 steady-state(epoch2+)
+#     기준 일관되게 순이득이었다(depth=3 epoch2+만 보면 -41.6%). 단 두 경우 다 **epoch1은
+#     오히려 손해**였다(depth=3: +24.4%) - 원인 미확인이지만 총 시간에는 항상 포함해서 판단할 것.
+#   - attention(n_valid=n_features)과 leaf(n_valid=n_classes) 둘 다 이 프로젝트가 실제 쓰는
+#     소수의 값(iris 기준 n_features=4, n_classes=3)에서 같은 패턴이 나와 같은 기준을 쓰지만,
+#     다른 feature/class 수에서도 이 임계값이 최적이라고 일반화하지 않는다.
+_SOFTMAX_BATCH_MIN_COUNT = 4
+
+
+def _group_softmax(ctx, cts: list, n_valid: int, n_pow2: int, slot_count: int, mode: str = "auto"):
+    """`cts`(길이 count)의 서로 독립적인 softmax들을 계산한다 - `mode`로 경로를 명시적으로
+    고정하거나("individual"/"batched") 자동 선택("auto", 기본)할 수 있다. `auto`는
+    `_SOFTMAX_BATCH_MIN_COUNT`(위 설명 참고)를 기준으로 판단한다. 반환값은 어느 경로든
+    `packed_softmax(cts[k],...)`를 개별 호출했을 때와 같은 compact 레이아웃
+    (슬롯 0..n_valid-1) 리스트라서 호출부는 어느 경로가 선택됐는지 신경 쓸 필요가 없다."""
+    if mode == "individual":
+        use_batched = False
+    elif mode == "batched":
+        use_batched = True
+    elif mode == "auto":
+        use_batched = len(cts) >= _SOFTMAX_BATCH_MIN_COUNT
+    else:
+        raise ValueError(f"알 수 없는 softmax_mode={mode!r} - individual/batched/auto 중 하나여야 함")
+
+    if use_batched:
+        return _batch_group_softmax(ctx, cts, n_valid, slot_count)
+    return [packed_softmax(ctx, cts[k], n_valid, n_pow2) for k in range(len(cts))]
+
+
+def _batch_group_softmax(ctx, cts: list, n_valid: int, slot_count: int):
+    """`cts`(길이 count, 각각 슬롯 0..n_valid-1에 값)의 서로 독립적인 softmax들을
+    `block_packed_softmax` 1번으로 배치 계산한다 - `core.encrypted_ops.softmax.packed_softmax`를
+    count번 개별 호출하는 것과 수학적으로 동일하되, 각 호출이 반복하던 exp 다항식 평가
+    (degree 20)와 Newton reciprocal iteration(10회, 매회 ct×ct multiply 2번)을 count번이
+    아니라 **1번만** 하게 된다(분모 reduction만 원래 `block_packed_softmax`처럼
+    `block_local_sum`으로 대체) - 이게 이 함수가 주는 이득의 대부분이다(단순 rotate 횟수
+    절감이 아니라 poly eval/Newton multiply 자체의 반복 횟수가 준다).
+
+    2026-09-28 Step 5 실측(실제 GPU, level_preset=17, softmax 단계만 격리):
+    - leaf softmax(n_leaves=8, n_classes=3): 77.2s->10.2s(-87%), bootstrap 16->2,
+      evaluate_polynomial 8->1, multiply_ct_ct 160->20.
+    - node-attention softmax(4-node level, n_features=4): 38.6s->9.9s(-74%), bootstrap 8->2.
+    둘 다 true softmax 대비 오차가 개별 호출 방식과 같은 자릿수(~1e-4)라 추출 비용까지
+    포함한 순이득임을 확인했다(`compare_packed_refactor_gpu.py`류가 아니라 이번 세션의
+    `step5_softmax_bench.py`/`step5_node_softmax_bench.py`). 반환값은
+    `packed_softmax(cts[k],...)`를 개별 호출했을 때와 같은 compact 레이아웃
+    (슬롯 0..n_valid-1)이므로 호출부 이후 로직은 전혀 안 바뀐다."""
+    count = len(cts)
+    block_size = compute_block_size_tight(n_valid)
+    assert_layout_fits(count, block_size, slot_count)
+    batched = scatter_to_blocks(ctx, cts, block_size)
+    batched_result = block_packed_softmax(ctx, batched, n_groups=count, n_valid=n_valid, block_size=block_size)
+    valid_mask = np.zeros(slot_count)
+    valid_mask[:n_valid] = 1.0
+    return [extract_block_to_full(ctx, batched_result, idx, block_size, valid_mask) for idx in range(count)]
+
+
+def _node_gate_packed(ctx, w, threshold_i: list, blocked_features, block_masks: list, block_size: int, sample_mask, n_features: int):
     """한 internal node의 (gate, gate_blocked, w)를 계산 - packed 학습/추론이 공유하는
     유일한 CKKS 연산 순서(원본 forward_backward_update_N_packed의 158~182행, predict_packed의
     81~94행과 완전히 동일).
+
+    **2026-09-28 Step 5**: `w`(attention softmax 결과)는 이 함수가 더 이상 직접 계산하지
+    않는다 - 호출부가 같은 레벨의 모든 node를 `_group_softmax`(count 기준 auto/individual/
+    batched 중 선택, `_SOFTMAX_BATCH_MIN_COUNT` 참고)로 한 번에 계산해서 넘겨준다(레벨
+    안의 node들은 서로 독립이라 배치가 안전). 이 함수는 넘겨받은 `w`를 그대로 반환하기만
+    한다(호출부의 `gate, gate_blocked, w = _node_gate_packed(...)` unpacking 패턴을 그대로
+    유지하기 위함).
 
     **`extract_block_to_full`의 sample_mask 곱셈이 baseline과 달리 필수인 이유**:
     baseline의 gate_j는 회전 없는 단일 feature ciphertext라 n_samples 밖은 원래부터
@@ -84,8 +163,6 @@ def _node_gate_packed(ctx, alpha_i, threshold_i: list, blocked_features, block_m
     n_samples 밖에서 오염된 채로 전파된다(2026-09 디버깅에서 실측: 마스킹을 빼면
     alpha/threshold가 baseline과 1 epoch만에 이미 0.003~0.009 어긋남 - leaf_logits는 이
     마스킹과 무관한 코드라 정상이었음)."""
-    w = packed_softmax(ctx, alpha_i, n_features, n_pow2_f)
-
     blocked_threshold_i = pack_threshold_blocked(ctx, threshold_i, block_masks)
     enc_diff_blocked = ctx.engine.subtract(blocked_features, blocked_threshold_i)
     enc_diff_blocked = ensure_level(ctx, enc_diff_blocked, min_level=12)
@@ -114,12 +191,15 @@ def _propagate_reach_prob(ctx, gate, parent_prob):
     return _ensure_level(ctx, left), _ensure_level(ctx, right)
 
 
-def _leaf_class_scores(ctx, leaf_logits: list, leaf_probs: list, n_classes: int, n_pow2_c: int, n_leaves: int):
+def _leaf_class_scores(ctx, leaf_logits: list, leaf_probs: list, n_classes: int, n_pow2_c: int, n_leaves: int, softmax_mode: str = "auto"):
     """leaf_logits(softmax로 leaf distribution)와 leaf_probs(reach probability)로 클래스별
     encrypted score(y_hat)를 계산 - packed 학습/추론이 공유. `leafdist`도 함께 반환한다 -
     training은 이 값을 leaf backward(softmax_backward_packed)에 다시 쓰고, predict_packed은
-    반환받은 걸 그냥 버린다(저장 안 하니 predict 쪽 ciphertext 수명은 원래 코드와 동일)."""
-    leafdist = [packed_softmax(ctx, leaf_logits[l], n_classes, n_pow2_c) for l in range(n_leaves)]
+    반환받은 걸 그냥 버린다(저장 안 하니 predict 쪽 ciphertext 수명은 원래 코드와 동일).
+
+    **2026-09-28 Step 5**: leaf들은 서로 완전히 독립이라 `_group_softmax`로 배치/개별 여부를
+    `softmax_mode`(기본 "auto" - `_SOFTMAX_BATCH_MIN_COUNT` 참고)에 따라 정해서 계산한다."""
+    leafdist = _group_softmax(ctx, leaf_logits, n_classes, n_pow2_c, ctx.engine.slot_count, mode=softmax_mode)
 
     y_hat = []
     for c in range(n_classes):
@@ -143,6 +223,7 @@ def predict_packed(
     n_features: int,
     n_classes: int,
     depth: int,
+    softmax_mode: str = "auto",
 ):
     """학습된(암호화 상태 그대로인) params로 `dataset`(보통 test set)에 대해 **forward만**
     실행해서 클래스별 encrypted score(y_hat)를 계산한다. `_node_gate_packed`/
@@ -152,7 +233,10 @@ def predict_packed(
     코드와 동일한 수명, 리팩터로 GPU 메모리 보유 기간이 늘어나지 않음). params(alpha/
     threshold/leaf_logits)는 절대 decrypt하지 않는다 - 유일한 decrypt 지점은 이 함수가
     반환하는 y_hat뿐이다(client_assisted/inference.py 모듈 docstring의 "client가 아는
-    유일한 예외적 decrypt 지점" 원칙과 동일)."""
+    유일한 예외적 decrypt 지점" 원칙과 동일).
+
+    `softmax_mode`("auto"/"individual"/"batched", 2026-09-28 Step 5)는 `_group_softmax`로
+    그대로 전달된다 - `_SOFTMAX_BATCH_MIN_COUNT` 설명 참고."""
     n_pow2_f = next_power_of_two(n_features)
     n_pow2_c = next_power_of_two(n_classes)
     n_leaves = 1 << depth
@@ -160,12 +244,18 @@ def predict_packed(
     current_level_probs = [None]
     node_idx = 0
     for _level in range(depth):
+        count = len(current_level_probs)
+        # 2026-09-28 Step 5: 이 레벨의 count개 node는 서로 독립이라 attention softmax를
+        # (조건에 따라) 배치 계산한다(_node_gate_packed는 더 이상 이걸 직접 안 함).
+        ws_this_level = _group_softmax(
+            ctx, params["alpha"][node_idx:node_idx + count], n_features, n_pow2_f, ctx.engine.slot_count, mode=softmax_mode,
+        )
         next_level_probs = []
-        for parent_prob in current_level_probs:
+        for level_idx, parent_prob in enumerate(current_level_probs):
             i = node_idx
             gate, _gate_blocked, _w = _node_gate_packed(
-                ctx, params["alpha"][i], params["threshold"][i], blocked_features,
-                block_masks, block_size, sample_mask, n_features, n_pow2_f,
+                ctx, ws_this_level[level_idx], params["threshold"][i], blocked_features,
+                block_masks, block_size, sample_mask, n_features,
             )
             left, right = _propagate_reach_prob(ctx, gate, parent_prob)
             next_level_probs.append(left)
@@ -175,7 +265,7 @@ def predict_packed(
         current_level_probs = next_level_probs
     leaf_probs = current_level_probs
 
-    y_hat, _leafdist = _leaf_class_scores(ctx, params["leaf_logits"], leaf_probs, n_classes, n_pow2_c, n_leaves)
+    y_hat, _leafdist = _leaf_class_scores(ctx, params["leaf_logits"], leaf_probs, n_classes, n_pow2_c, n_leaves, softmax_mode=softmax_mode)
     return y_hat
 
 
@@ -192,11 +282,15 @@ def forward_backward_update_N_packed(
     n_classes: int,
     depth: int,
     lr: float,
+    softmax_mode: str = "auto",
 ):
     """baseline forward_backward_update_N과 시그니처가 거의 같되, setup 시 1회만 만들면
     되는 packing 결과물(blocked_features/sample_mask_blocked/block_masks/block_size)을
     추가로 받는다 - 이것들은 epoch마다 안 바뀌므로 setup_worker_packed.py가 한 번만 만들어
-    넘긴다."""
+    넘긴다.
+
+    `softmax_mode`("auto"/"individual"/"batched", 2026-09-28 Step 5)는 `_group_softmax`로
+    그대로 전달된다 - `_SOFTMAX_BATCH_MIN_COUNT` 설명 참고."""
     n_pow2_f = next_power_of_two(n_features)
     n_pow2_c = next_power_of_two(n_classes)
     n_internal = (1 << depth) - 1
@@ -211,8 +305,16 @@ def forward_backward_update_N_packed(
     current_level_probs = [None]
     node_idx = 0
     for _level in range(depth):
+        count = len(current_level_probs)
+        # 2026-09-28 Step 5: 이 레벨의 count개 node는 서로 독립이라 attention softmax를
+        # (조건에 따라) 배치 계산한다(_node_gate_packed는 더 이상 이걸 직접 안 함) - backward는
+        # node_w[i]를 그대로 재사용하므로(아래 threshold/attention backward 참고) 이 변경만으로
+        # 충분하고 backward 쪽은 손댈 필요가 없다.
+        ws_this_level = _group_softmax(
+            ctx, params["alpha"][node_idx:node_idx + count], n_features, n_pow2_f, slot_count, mode=softmax_mode,
+        )
         next_level_probs = []
-        for parent_prob in current_level_probs:
+        for level_idx, parent_prob in enumerate(current_level_probs):
             i = node_idx
             # --- predict_packed()과 공유하는 forward 조각(이 파일 상단 _node_gate_packed) -
             # baseline의 `for j in range(n_features): sigmoid_approx_enc(...)` 루프
@@ -220,8 +322,8 @@ def forward_backward_update_N_packed(
             # 여기서만 backward용으로 gate_blocked/w를 node_gate_blocked/node_w에 저장해서
             # 오래 들고 있는다(predict_packed은 이 저장을 안 해서 참조가 훨씬 짧게 산다).
             gate, gate_blocked, w = _node_gate_packed(
-                ctx, params["alpha"][i], params["threshold"][i], blocked_features,
-                block_masks, block_size, sample_mask, n_features, n_pow2_f,
+                ctx, ws_this_level[level_idx], params["threshold"][i], blocked_features,
+                block_masks, block_size, sample_mask, n_features,
             )
             node_gate[i], node_gate_blocked[i], node_w[i], node_parent_prob[i] = gate, gate_blocked, w, parent_prob
 
@@ -236,7 +338,7 @@ def forward_backward_update_N_packed(
     # --- leaf 계산: predict_packed()과 공유(이 파일 상단 _leaf_class_scores). leafdist는
     # 아래 backward(softmax_backward_packed)에서 다시 쓰이므로 여기서는 버리지 않는다.
     # backward 자체는 feature 축과 무관 - baseline과 완전히 동일 ---
-    y_hat, leafdist = _leaf_class_scores(ctx, params["leaf_logits"], leaf_probs, n_classes, n_pow2_c, n_leaves)
+    y_hat, leafdist = _leaf_class_scores(ctx, params["leaf_logits"], leaf_probs, n_classes, n_pow2_c, n_leaves, softmax_mode=softmax_mode)
 
     n_samples = dataset.n_samples
     dL_dyhat = []
