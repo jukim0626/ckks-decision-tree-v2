@@ -38,6 +38,7 @@ src/
         ├── plaintext_softmax.py   # plaintext (numpy) softmax used by reference implementations
         ├── baseline/              # gradient-descent soft tree, verified for depth 1-3 (comparison baseline)
         ├── packed/                # feature-axis SIMD packing (~26x speedup on a depth-3 tree) - current focus
+        │                          #   (+ instrumentation.py: op/bootstrap counters, GPU peak memory)
         ├── tests/                 # automated pass/fail checks (CPU-only, no GPU needed)
         └── experiments/           # manual diagnostics and legacy-session migration tools
 ```
@@ -48,6 +49,47 @@ comparison reference it has always been. Two earlier lineages (`local_loss`, a p
 training variant, and `opt`, a set of bootstrap-count-reduction ablations) were explored and are no
 longer supported; their code was removed rather than kept around unused. Both are still reachable in
 git history (tag `pre-cleanup-packed-joint-optim`) if needed again.
+
+## How the `packed` path works
+
+All training samples of one feature live in a single ciphertext (one slot per sample). The `packed`
+path additionally places every feature in its own block of one wide ciphertext
+(feature `j` -> slots `[j*B, (j+1)*B)`, `B = next_pow2(n_samples)`), so that per node:
+
+- **forward**: all `(x_j - threshold_j)` differences go through the sigmoid polynomial **once**
+  instead of once per feature;
+- **backward**: threshold/attention gradient reductions use a block-local rotate-and-add
+  (`log2(B)` rotations for all features at once) instead of one full-width sum per feature;
+- **softmax batching**: the attention softmax of all nodes on one tree level, and the class
+  softmax of all leaves, are evaluated together in one blocked ciphertext (one exp polynomial
+  and one Newton-Raphson reciprocal for the whole group);
+- **public masks stay plaintext**: the sample mask depends only on `n_samples`, which is public,
+  so it is multiplied as a plaintext (no relinearization).
+
+Each training "epoch" is one **full-batch gradient-descent step** over the whole encrypted training
+set, run in its own subprocess (setup / per-epoch / finalize workers) so GPU memory held by the CKKS
+engine is fully released between steps.
+
+## Results (depth 3, 30 epochs, `level_preset=17`, 80/20 split, seed 0)
+
+| dataset | features | lr | first epoch | steady-state / epoch | train acc | test acc (encrypted inference) |
+|---|---|---|---|---|---|---|
+| iris | 4 | 2.0 | 428 s | ~275 s | 0.958 | 0.900 |
+| wine | 13 | 6.0 | 723 s | ~291 s | 0.901 | 0.833 |
+| breast_cancer | 30 | 2.0 | 1246 s | ~279 s | 0.908 | 0.947 |
+
+Single NVIDIA GPU (24 GB). Test accuracy is measured by genuine encrypted inference
+(`predict_packed`): the trained parameters are never decrypted, only the final class scores.
+
+## Known limitations
+
+- **Few optimization steps.** 30 epochs = 30 full-batch GD steps. Plaintext runs of the same model
+  keep improving well beyond that (e.g. 300+ steps), so accuracy is currently step-limited.
+- **Polynomial domain.** The sigmoid polynomial is fit on `[-2, 2]` and the softmax exp polynomial on
+  `[-2.5, 2.5]`; nothing yet constrains parameters (or out-of-range test features) to stay inside
+  these intervals, which becomes an issue with longer or more aggressive training.
+- **Parameter storage.** Thresholds are stored as one ciphertext per (node, feature), so very wide
+  datasets or deeper trees run out of GPU memory; nodes on the same level are processed sequentially.
 
 ## Setup
 
@@ -68,7 +110,9 @@ python -m models.gradient_soft_tree.baseline.train <dataset> <depth> <epochs> <l
 python -m models.gradient_soft_tree.baseline.train iris 3 35 2.0 0 17
 
 # feature-axis SIMD packing (current focus)
-python -m models.gradient_soft_tree.packed.train <dataset> <depth> <epochs> <lr> <seed> <level_preset>
+python -m models.gradient_soft_tree.packed.train <dataset> <depth> <epochs> <lr> <seed> <level_preset> [max_train] [test_size]
+# example (test_size defaults to 0.2; max_train subsamples the training set, "none" = all)
+python -m models.gradient_soft_tree.packed.train wine 3 30 6.0 0 17
 # genuine encrypted inference on a trained session (never decrypts the model, only the final score)
 python -m models.gradient_soft_tree.packed.predict_packed <session_dir>
 
@@ -79,12 +123,17 @@ python -m models.gradient_soft_tree.tests.test_block_packed_softmax
 python -m models.gradient_soft_tree.tests.test_packed_vs_plaintext <dataset> <depth> <epochs> <lr>  # GPU only
 ```
 
-`<dataset>` is one of `iris`, `wine`, `breast_cancer`, `digits`, `diabetes`.
+`<dataset>` is one of `iris`, `wine`, `breast_cancer`, `digits`, `diabetes`, `soybean`. Features are
+min-max scaled to `[-1, 1]` on the client before encryption; the fitted scaler is saved with the
+session so finalize/inference reuse it instead of refitting.
+
+The packed layout requires `n_features * next_pow2(n_samples) <= 32768` slots; use `max_train` to
+subsample wider datasets.
 
 ## Notes
 
 - GPU-backed CKKS (via `desilofhe`); long training runs are typically detached with `nohup`
-  since they can take minutes per epoch at higher depths.
+  since a depth-3 epoch takes several minutes.
 - Earlier approaches (client-assisted decrypt-based splitting, closed-form MGI with
   encrypted argmin, oblique gates) are kept locally for reference but aren't part of this
   public tree, since the project settled on a fully end-to-end, comparison-free design.
