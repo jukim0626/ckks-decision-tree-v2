@@ -30,6 +30,30 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from core.data.dataset import load_scaled_dataset_subset, one_hot_encode  # noqa: E402
 from models.gradient_soft_tree.plaintext_softmax import softmax, softmax_backward  # noqa: E402
+from core.approximation.sigmoid import SPLIT_SIGMOID_COEFFS, STEEPNESS  # noqa: E402
+from core.encrypted_ops.softmax import _EXP_COEFFS  # noqa: E402
+
+# 2026-10-07: approx="poly"는 CKKS가 실제로 계산하는 함수(15차 sigmoid 다항식, 20차 exp 다항식)를
+# plaintext로 그대로 흉내 낸다. 이 모드와 CKKS 결과의 차이 = 순수 CKKS 노이즈, true 모드와
+# poly 모드의 차이 = 다항식 근사 오차 - 두 오차를 분리해서 보고하기 위함.
+# (softmax의 Newton reciprocal은 정확한 나눗셈으로 대신한다 - 10회 반복이면 ~1e-4 이내로 수렴.)
+APPROX_MODES = ("true", "poly")
+
+
+def _gate_values(diff: np.ndarray, steepness: float, approx: str) -> np.ndarray:
+    """diff = x - threshold에 대한 gate. poly는 steepness=8이 계수에 이미 들어있다."""
+    if approx == "poly":
+        if steepness != STEEPNESS:
+            raise ValueError(f"poly 모드는 steepness={STEEPNESS}만 지원(계수에 baked-in)")
+        return np.polynomial.polynomial.polyval(diff, SPLIT_SIGMOID_COEFFS)
+    return 1.0 / (1.0 + np.exp(-steepness * diff))
+
+
+def _softmax(z: np.ndarray, approx: str) -> np.ndarray:
+    if approx == "poly":
+        e = np.polynomial.polynomial.polyval(z, _EXP_COEFFS)
+        return e / e.sum()
+    return softmax(z)
 
 
 def train_depthN(
@@ -40,7 +64,11 @@ def train_depthN(
     lr: float = 0.3,
     epochs: int = 300,
     seed: int = 0,
+    approx: str = "true",
 ) -> dict:
+    """epochs = full-batch GD iteration 수(1 epoch = 파라미터 갱신 1번)."""
+    if approx not in APPROX_MODES:
+        raise ValueError(f"approx must be one of {APPROX_MODES}")
     rng = np.random.default_rng(seed)
     n_samples, n_features = X.shape
     n_classes = y_onehot.shape[1]
@@ -64,8 +92,8 @@ def train_depthN(
             next_level_probs = []
             for parent_prob_arr in current_level_probs:
                 i = node_idx
-                w = softmax(alpha[i])
-                gate_j = 1.0 / (1.0 + np.exp(-steepness * (X - threshold[i])))
+                w = _softmax(alpha[i], approx)
+                gate_j = _gate_values(X - threshold[i], steepness, approx)
                 gate = gate_j @ w
                 node_gate[i], node_gate_j[i], node_w[i] = gate, gate_j, w
                 node_parent_prob[i] = parent_prob_arr
@@ -75,7 +103,7 @@ def train_depthN(
             current_level_probs = next_level_probs
         leaf_probs = current_level_probs  # length n_leaves
 
-        leafdist = [softmax(leaf_logits[l]) for l in range(n_leaves)]
+        leafdist = [_softmax(leaf_logits[l], approx) for l in range(n_leaves)]
         y_hat = sum(np.outer(leaf_probs[l], leafdist[l]) for l in range(n_leaves))
         dL_dyhat = (2.0 / n_samples) * (y_hat - y_onehot)
 
@@ -116,7 +144,11 @@ def train_depthN(
     return {"alpha": alpha, "threshold": threshold, "leaf_logits": leaf_logits, "steepness": steepness, "depth": depth}
 
 
-def predict(X: np.ndarray, params: dict) -> np.ndarray:
+def predict(X: np.ndarray, params: dict, approx: str = "true") -> np.ndarray:
+    """approx="true"는 진짜 sigmoid/exp, "poly"는 CKKS와 같은 다항식(encrypted inference를
+    plaintext로 흉내 낸 것 - CKKS 노이즈만 빠져 있다)."""
+    if approx not in APPROX_MODES:
+        raise ValueError(f"approx must be one of {APPROX_MODES}")
     depth = params["depth"]
     steepness = params["steepness"]
     n_samples = X.shape[0]
@@ -125,17 +157,36 @@ def predict(X: np.ndarray, params: dict) -> np.ndarray:
     for _level in range(depth):
         next_level_probs = []
         for parent_prob_arr in current_level_probs:
-            w = softmax(params["alpha"][node_idx])
-            gate_j = 1.0 / (1.0 + np.exp(-steepness * (X - params["threshold"][node_idx])))
+            w = _softmax(params["alpha"][node_idx], approx)
+            gate_j = _gate_values(X - params["threshold"][node_idx], steepness, approx)
             gate = gate_j @ w
             next_level_probs.append(parent_prob_arr * (1.0 - gate))
             next_level_probs.append(parent_prob_arr * gate)
             node_idx += 1
         current_level_probs = next_level_probs
     leaf_probs = current_level_probs
-    leafdist = [softmax(params["leaf_logits"][l]) for l in range(len(leaf_probs))]
+    leafdist = [_softmax(params["leaf_logits"][l], approx) for l in range(len(leaf_probs))]
     y_hat = sum(np.outer(leaf_probs[l], leafdist[l]) for l in range(len(leaf_probs)))
     return y_hat.argmax(axis=1)
+
+
+def domain_report(X: np.ndarray, params: dict) -> dict:
+    """다항식 근사 구간 이탈 진단: sigmoid 입력 x-threshold는 [-2,2], softmax 입력(alpha,
+    leaf_logits)은 [-2.5,2.5] 안에 있어야 CKKS 결과가 의미 있다."""
+    from core.approximation.sigmoid import SIGMOID_APPROX_INTERVAL
+    from core.encrypted_ops.softmax import SOFTMAX_EXP_INTERVAL
+
+    diff = X[:, None, :] - params["threshold"][None, :, :]
+    out_of_range = np.abs(diff) > SIGMOID_APPROX_INTERVAL
+    return {
+        "max_abs_gate_input": float(np.abs(diff).max()),
+        "n_samples_gate_out_of_range": int(out_of_range.any(axis=(1, 2)).sum()),
+        "max_abs_alpha": float(np.abs(params["alpha"]).max()),
+        "max_abs_leaf_logit": float(np.abs(params["leaf_logits"]).max()),
+        "softmax_out_of_range": bool(
+            max(np.abs(params["alpha"]).max(), np.abs(params["leaf_logits"]).max()) > SOFTMAX_EXP_INTERVAL[1]
+        ),
+    }
 
 
 def main():

@@ -38,7 +38,7 @@ def run_worker_with_oom_retry(
                 raise
             wait_s = base_wait_s * attempt
             print(
-                f"{log_prefix} epoch {epoch} OOM (attempt {attempt}/{max_retries}) - {wait_s:.0f}초 대기 후 재시도",
+                f"{log_prefix} iteration {epoch} OOM (attempt {attempt}/{max_retries}) - {wait_s:.0f}초 대기 후 재시도",
                 flush=True,
             )
             time.sleep(wait_s)

@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from core.data.serialization import load_context, read_dataset  # noqa: E402
+from core.data.serialization import load_server_context, read_dataset  # noqa: E402
 from core.ckks_engine import create_bootstrap_engine  # noqa: E402
 from core.runtime.gpu import GpuPeakWatcher  # noqa: E402
 from models.gradient_soft_tree.packed.block_ops import (  # noqa: E402
@@ -76,7 +76,7 @@ def main() -> None:
         mode=config["mode"], device_id=config["device_id"], level_preset=config.get("level_preset")
     )
     counter = CountingEngineProxy(engine)
-    ctx = load_context(counter, session_dir / "keys", mode=config["mode"], device_id=config["device_id"])
+    ctx = load_server_context(counter, session_dir / "keys", mode=config["mode"], device_id=config["device_id"])
     dataset = read_dataset(
         ctx,
         session_dir / "dataset",

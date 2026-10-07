@@ -66,13 +66,14 @@ path additionally places every feature in its own block of one wide ciphertext
 - **public masks stay plaintext**: the sample mask depends only on `n_samples`, which is public,
   so it is multiplied as a plaintext (no relinearization).
 
-Each training "epoch" is one **full-batch gradient-descent step** over the whole encrypted training
-set, run in its own subprocess (setup / per-epoch / finalize workers) so GPU memory held by the CKKS
+Each training **iteration** is one **full-batch gradient-descent step** over the whole encrypted
+training set (the CLI argument is still named `epochs`; 1 epoch = 1 iteration = 1 parameter update),
+run in its own subprocess (setup / per-epoch / finalize workers) so GPU memory held by the CKKS
 engine is fully released between steps.
 
-## Results (depth 3, 30 epochs, `level_preset=17`, 80/20 split, seed 0)
+## Results (depth 3, 30 iterations, `level_preset=17`, 80/20 split, seed 0)
 
-| dataset | features | lr | first epoch | steady-state / epoch | train acc | test acc (encrypted inference) |
+| dataset | features | lr | first iteration | steady-state / iteration | train acc | test acc (encrypted inference) |
 |---|---|---|---|---|---|---|
 | iris | 4 | 2.0 | 428 s | ~275 s | 0.958 | 0.900 |
 | wine | 13 | 6.0 | 723 s | ~291 s | 0.901 | 0.833 |
@@ -83,13 +84,27 @@ Single NVIDIA GPU (24 GB). Test accuracy is measured by genuine encrypted infere
 
 ## Known limitations
 
-- **Few optimization steps.** 30 epochs = 30 full-batch GD steps. Plaintext runs of the same model
+- **Few optimization steps.** 30 iterations = 30 full-batch GD steps. Plaintext runs of the same model
   keep improving well beyond that (e.g. 300+ steps), so accuracy is currently step-limited.
 - **Polynomial domain.** The sigmoid polynomial is fit on `[-2, 2]` and the softmax exp polynomial on
-  `[-2.5, 2.5]`; nothing yet constrains parameters (or out-of-range test features) to stay inside
-  these intervals, which becomes an issue with longer or more aggressive training.
+  `[-2.5, 2.5]`. Client-side scaling clips features to `[-1, 1]`, but nothing yet constrains the
+  learned parameters to stay inside these intervals, which becomes an issue with longer or more
+  aggressive training (finalize reports this as `domain(...)` diagnostics).
 - **Parameter storage.** Thresholds are stored as one ciphertext per (node, feature), so very wide
   datasets or deeper trees run out of GPU memory; nodes on the same level are processed sequentially.
+
+## Keys and evaluation
+
+- **Key separation.** `session_dir/keys/` holds only public/evaluation keys (public, relinearization,
+  rotation, conjugation, bootstrap). The secret key lives in `session_dir/client/sk.bin`, together with
+  the client's scaler. Server-side workers (training iterations, the encrypted-inference forward pass)
+  build their context without a secret key (`ctx.sk is None`), so any accidental decryption on the
+  server path fails immediately.
+- **Three accuracy levels.** `finalize` decrypts the trained parameters (client-side, verification only)
+  and reports accuracy with the true sigmoid/exp (`[true-fn]`) and with the exact polynomials CKKS
+  evaluates (`[poly]`). `max abs diff` against a true-function plaintext run measures polynomial
+  approximation error plus CKKS noise; against a polynomial plaintext run it isolates CKKS noise.
+  `predict_packed` gives the third level: genuine encrypted inference, which matches `[poly]`.
 
 ## Setup
 

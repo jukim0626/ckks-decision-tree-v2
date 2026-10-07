@@ -21,10 +21,11 @@ from core.data.dataset import (  # noqa: E402
     encrypt_dataset,
     fit_scaler,
     one_hot_encode,
+    scale_features,
     save_scaler,
     split_dataset_subset,
 )
-from core.data.serialization import write_dataset, write_keys  # noqa: E402
+from core.data.serialization import client_sk_path, write_dataset, write_keys  # noqa: E402
 from core.ckks_engine import create_bootstrap_context  # noqa: E402
 from models.gradient_soft_tree.baseline.tree_ops import init_encrypted_params_N  # noqa: E402
 from models.gradient_soft_tree.params import save_alpha, save_leaf_logits, save_threshold  # noqa: E402
@@ -49,7 +50,7 @@ def main() -> None:
     # session_dir/client/ 아래 저장한다. finalize/predict가 재적합 없이 이걸 로드해서
     # transform만 하도록 하기 위함(학습 때와 다른 스케일링으로 평가하는 사고 방지).
     scaler = fit_scaler(X_train_raw)
-    X_train = scaler.transform(X_train_raw)
+    X_train = scale_features(scaler, X_train_raw)
     n_features = X_train.shape[1]
     n_classes = int(max(y_train.max(), y_test.max()) + 1)
     y_train_oh = one_hot_encode(y_train, n_classes)
@@ -59,7 +60,7 @@ def main() -> None:
     sample_mask = ctx.engine.encrypt([1.0] * dataset.n_samples, ctx.pk)
 
     session_dir.mkdir(parents=True, exist_ok=True)
-    write_keys(ctx, session_dir / "keys")
+    write_keys(ctx, session_dir / "keys", sk_path=client_sk_path(session_dir))  # sk는 client/에만
     write_dataset(ctx, dataset, session_dir / "dataset")
     ctx.engine.write_ciphertext(sample_mask, session_dir / "sample_mask.ct")
     save_scaler(scaler, session_dir / "client" / "scaler.json", dataset_name=dataset_name)

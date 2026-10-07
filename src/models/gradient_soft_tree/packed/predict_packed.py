@@ -26,10 +26,11 @@ from core.data.dataset import (  # noqa: E402
     encrypt_dataset,
     load_scaler,
     one_hot_encode,
+    scale_features,
     resolve_leaf_family_test_size,
     split_dataset_subset,
 )
-from core.data.serialization import load_context  # noqa: E402
+from core.data.serialization import load_client_secret_key, load_server_context  # noqa: E402
 from core.ckks_engine import create_bootstrap_engine  # noqa: E402
 from models.gradient_soft_tree.packed.block_ops import (  # noqa: E402
     assert_layout_fits,
@@ -55,7 +56,7 @@ def main() -> None:
     engine = create_bootstrap_engine(
         mode=config["mode"], device_id=config["device_id"], level_preset=config.get("level_preset")
     )
-    ctx = load_context(engine, session_dir / "keys", mode=config["mode"], device_id=config["device_id"])
+    ctx = load_server_context(engine, session_dir / "keys", mode=config["mode"], device_id=config["device_id"])
 
     params_dir = session_dir / "params"
     params = {
@@ -81,7 +82,7 @@ def main() -> None:
         expected_dataset_name=config["dataset_name"],
         expected_n_features=n_features,
     )
-    X_test = scaler.transform(X_test_raw)
+    X_test = scale_features(scaler, X_test_raw)
     y_test_oh = one_hot_encode(y_test, n_classes)  # encrypt_dataset 시그니처상 필요(추론엔 안 씀)
     dataset_test = encrypt_dataset(ctx, X_test, y_test_oh)
     # 2026-09-28: Step 2 - n_test는 공개 정보이므로 sample_mask를 encrypt할 필요가 없다.
@@ -104,7 +105,9 @@ def main() -> None:
 
     # --- 유일한 decrypt 지점: 최종 class score ---
     n_test = dataset_test.n_samples
-    scores = np.array([np.real(engine.decrypt(y_hat[c], ctx.sk))[:n_test] for c in range(n_classes)])  # (n_classes, n_test)
+    # --- 여기부터 client 측: 서버가 돌려준 y_hat을 client가 자기 sk로 decrypt ---
+    client_sk = load_client_secret_key(engine, session_dir)
+    scores = np.array([np.real(engine.decrypt(y_hat[c], client_sk))[:n_test] for c in range(n_classes)])  # (n_classes, n_test)
     pred = scores.argmax(axis=0)
     acc = (pred == y_test).mean()
 

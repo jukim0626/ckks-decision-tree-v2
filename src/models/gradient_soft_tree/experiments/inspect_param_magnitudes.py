@@ -7,6 +7,7 @@ python -m models.gradient_soft_tree.experiments.inspect_param_magnitudes <sessio
 
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import sys
 from pathlib import Path
@@ -14,7 +15,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-from core.data.serialization import load_context  # noqa: E402
+from core.data.serialization import load_client_secret_key, load_server_context  # noqa: E402
 from core.ckks_engine import create_bootstrap_engine  # noqa: E402
 
 
@@ -27,7 +28,8 @@ def main() -> None:
     n_leaves = 1 << depth
 
     engine = create_bootstrap_engine(mode=config["mode"], device_id=config["device_id"], level_preset=config.get("level_preset"))
-    ctx = load_context(engine, session_dir / "keys", mode=config["mode"], device_id=config["device_id"])
+    ctx = load_server_context(engine, session_dir / "keys", mode=config["mode"], device_id=config["device_id"])
+    ctx = replace(ctx, sk=load_client_secret_key(engine, session_dir))  # client 측 검증용 decrypt
 
     params_dir = session_dir / "params"
     alpha_vals = []

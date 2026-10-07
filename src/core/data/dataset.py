@@ -142,6 +142,18 @@ def fit_scaler(X_train_raw: np.ndarray, feature_range: tuple[float, float] = (-1
     return scaler
 
 
+def scale_features(scaler: MinMaxScaler, X_raw: np.ndarray) -> np.ndarray:
+    """client 측 전처리: 학습 때 fit한 scaler로 변환한 뒤 feature_range로 clip한다.
+
+    2026-10-07: scaler는 train으로만 fit하므로 test(추론) 데이터는 [-1,1] 밖으로 나갈 수 있다
+    (실측: wine test 최대 1.79, digits 3.0). sigmoid 다항식은 x-threshold가 [-2,2] 안에서만
+    유효하고 밖에서는 폭발한다(poly(2.5)=-281, poly(3.0)=-17602) - gate가 모든 feature의
+    sigmoid를 가중합하므로 attention이 거의 0인 feature 하나만 범위를 벗어나도 그 샘플의
+    점수가 망가진다. train 데이터는 정의상 이미 범위 안이라 clip해도 값이 안 바뀐다."""
+    lo, hi = scaler.feature_range
+    return np.clip(scaler.transform(X_raw), lo, hi)
+
+
 def load_scaled_dataset_subset(
     dataset_name: str = "iris",
     test_size: float | int = 0.2,
@@ -162,7 +174,7 @@ def load_scaled_dataset_subset(
     `load_scaler`로 복원해서 `.transform()`만 호출할 것(재적합 금지)."""
     X_train, X_test, y_train, y_test, class_names = split_dataset_subset(dataset_name, test_size, max_train)
     scaler = fit_scaler(X_train)
-    return scaler.transform(X_train), scaler.transform(X_test), y_train, y_test, class_names
+    return scale_features(scaler, X_train), scale_features(scaler, X_test), y_train, y_test, class_names
 
 
 SCALER_SCHEMA_VERSION = 1

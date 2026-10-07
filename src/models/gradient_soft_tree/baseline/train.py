@@ -47,16 +47,30 @@ def train(dataset_name: str, depth: int, n_epochs: int, lr: float, seed: int, le
         t0 = time.time()
         run_worker_module("models.gradient_soft_tree.baseline.epoch_worker", str(session_dir))
         elapsed = time.time() - t0
-        print(f"[{dataset_name} depth={depth}] epoch {epoch}/{n_epochs} done | {elapsed:.1f}s", flush=True)
+        print(f"[{dataset_name} depth={depth}] iteration {epoch}/{n_epochs} (full-batch GD step) done | {elapsed:.1f}s", flush=True)
 
     wait_for_gpu_settle()
     stdout = run_worker_module("models.gradient_soft_tree.baseline.finalize_worker", str(session_dir), str(n_epochs))
     result = json.loads(stdout.strip().splitlines()[-1])
     print(
-        f"[{dataset_name} depth={depth}] max abs diff vs plaintext = {result['max_err']:.5f} | "
+        f"[{dataset_name} depth={depth}] [true-fn] max abs diff vs plaintext = {result['max_err']:.5f} | "
         f"train_acc={result['train_acc']:.4f} test_acc={result['test_acc']:.4f}",
         flush=True,
     )
+    print(
+        f"[{dataset_name} depth={depth}] [poly]    max abs diff vs plaintext = {result['max_err_poly']:.5f} | "
+        f"train_acc={result['train_acc_poly']:.4f} test_acc={result['test_acc_poly']:.4f}",
+        flush=True,
+    )
+    for split in ("train", "test"):
+        d = result[f"domain_{split}"]
+        flag = "  <-- 다항식 구간 이탈!" if d["n_samples_gate_out_of_range"] or d["softmax_out_of_range"] else ""
+        print(
+            f"[{dataset_name} depth={depth}] domain({split}): max|x-t|={d['max_abs_gate_input']:.3f}(<=2) "
+            f"out_of_range_samples={d['n_samples_gate_out_of_range']} "
+            f"max|alpha|={d['max_abs_alpha']:.3f} max|leaf|={d['max_abs_leaf_logit']:.3f}(<=2.5){flag}",
+            flush=True,
+        )
     print(f"[{dataset_name} depth={depth}] session_dir={session_dir}", flush=True)
     return result
 
