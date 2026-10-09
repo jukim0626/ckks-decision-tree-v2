@@ -15,3 +15,8 @@ src/archive/
 /docs/
 /presentation/
 /.claude/
+
+# 2026-10-09: 논문 계획/초안(미발표) - 공개 repo에 올리지 않음
+/PAPER_ROADMAP.md
+/ROADMAP.md
+/paper/

@@ -24,6 +24,9 @@ class BootstrapTrainingContext:
     small_bootstrap_key: object
     mode: str
     device_id: int
+    # 2026-10-09: 일반 bootstrap key(desilofhe create_bootstrap_key, medium ~9.9GiB). 있으면 ensure_level이
+    # small key 대신 이걸 쓴다 - GPU 실측 bootstrap 4.4s -> 1.5s(merge_bootstrap이면 ct 2개에 1.5s).
+    bootstrap_key: object = None
 
 
 def create_bootstrap_engine(mode: str = "gpu", device_id: int = 0, level_preset: int | None = None) -> Engine:
@@ -41,7 +44,7 @@ def create_bootstrap_engine(mode: str = "gpu", device_id: int = 0, level_preset:
 
 
 def create_bootstrap_context(
-    mode: str = "gpu", device_id: int = 0, level_preset: int | None = None
+    mode: str = "gpu", device_id: int = 0, level_preset: int | None = None, regular_bootstrap_key: bool = False
 ) -> BootstrapTrainingContext:
     engine = create_bootstrap_engine(mode=mode, device_id=device_id, level_preset=level_preset)
     sk = engine.create_secret_key()
@@ -60,7 +63,38 @@ def create_bootstrap_context(
         small_bootstrap_key=small_bootstrap_key,
         mode=mode,
         device_id=device_id,
+        bootstrap_key=engine.create_bootstrap_key(sk, size="medium") if regular_bootstrap_key else None,
     )
+
+
+def _bootstrap(ctx, ct):
+    if getattr(ctx, "bootstrap_key", None) is not None:
+        return ctx.engine.bootstrap(ct, ctx.rlk, ctx.conjugation_key, ctx.bootstrap_key)
+    return ctx.engine.bootstrap(ct, ctx.rlk, ctx.conjugation_key, ctx.rotation_key, ctx.small_bootstrap_key)
+
+
+def _merge_bootstrap(ctx, a, b):
+    if getattr(ctx, "bootstrap_key", None) is not None:
+        return ctx.engine.merge_bootstrap(a, b, ctx.rlk, ctx.conjugation_key, ctx.bootstrap_key)
+    return ctx.engine.merge_bootstrap(a, b, ctx.rlk, ctx.conjugation_key, ctx.rotation_key, ctx.small_bootstrap_key)
+
+
+def ensure_levels(ctx, cts: list, min_level: int = 8) -> list:
+    """여러 ciphertext를 한꺼번에 레벨 확보. bootstrap이 필요한 것들을 2개씩 merge_bootstrap으로 묶는다
+    (실수 값 두 개를 실수부/허수부로 합쳐 bootstrap 한 번 - GPU 실측 1회 비용으로 ct 2개). 홀수면 마지막은 단독.
+    엔진이 merge_bootstrap을 지원하지 않으면(numpy 시뮬레이터 등) 하나씩 한다."""
+    out = list(cts)
+    need = [i for i, ct in enumerate(out) if ct.level < min_level]
+    merge = hasattr(ctx.engine, "merge_bootstrap")
+    while need:
+        if merge and len(need) >= 2:
+            i, j = need.pop(0), need.pop(0)
+            a, b = _merge_bootstrap(ctx, ctx.engine.intt(out[i]), ctx.engine.intt(out[j]))
+            out[i], out[j] = ctx.engine.intt(a), ctx.engine.intt(b)
+        else:
+            i = need.pop(0)
+            out[i] = ctx.engine.intt(_bootstrap(ctx, ctx.engine.intt(out[i])))
+    return out
 
 
 def ensure_level(ctx, ct, min_level: int = 8):
@@ -70,9 +104,5 @@ def ensure_level(ctx, ct, min_level: int = 8):
     multiply 체인을 여러 단계 거친 ciphertext는 NTT form일 수 있어서, 호출 전에 무조건
     intt로 정규화한다(intt는 이미 normal form이어도 값이 안 깨지는 안전한 연산)."""
     if ct.level < min_level:
-        ct = ctx.engine.intt(ct)
-        refreshed = ctx.engine.bootstrap(
-            ct, ctx.rlk, ctx.conjugation_key, ctx.rotation_key, ctx.small_bootstrap_key
-        )
-        return ctx.engine.intt(refreshed)
+        return ctx.engine.intt(_bootstrap(ctx, ctx.engine.intt(ct)))
     return ct

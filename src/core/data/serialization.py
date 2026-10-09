@@ -35,6 +35,8 @@ def write_keys(ctx, keys_dir: Path, sk_path: Path | None = None) -> None:
     ctx.engine.write_rotation_key(ctx.rotation_key, keys_dir / "rotk.bin")
     ctx.engine.write_conjugation_key(ctx.conjugation_key, keys_dir / "conjk.bin")
     ctx.engine.write_small_bootstrap_key(ctx.small_bootstrap_key, keys_dir / "sbk.bin")
+    if getattr(ctx, "bootstrap_key", None) is not None:   # 일반 bootstrap key(평가용 공개 key, 2026-10-09)
+        ctx.engine.write_bootstrap_key(ctx.bootstrap_key, keys_dir / "bk.bin")
 
 
 def client_sk_path(session_dir: Path) -> Path:
@@ -55,6 +57,7 @@ def load_server_context(engine, keys_dir: Path, mode: str, device_id: int) -> Bo
         small_bootstrap_key=engine.read_small_bootstrap_key(keys_dir / "sbk.bin"),
         mode=mode,
         device_id=device_id,
+        bootstrap_key=engine.read_bootstrap_key(keys_dir / "bk.bin") if (keys_dir / "bk.bin").exists() else None,
     )
 
 

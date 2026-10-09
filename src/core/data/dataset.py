@@ -52,6 +52,100 @@ def _load_soybean():
     return SimpleNamespace(data=X, target=target, target_names=target_names)
 
 
+def _cache_dir() -> Path:
+    from sklearn.datasets import get_data_home
+    d = Path(get_data_home()) / "ckks_tree_cache"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _encode_categorical(df) -> np.ndarray:
+    """범주형 feature를 정수로 인코딩(one-hot은 쓰지 않는다 - 2026-09-16/10-08 결정).
+    카테고리가 전부 숫자나 숫자 구간('0-4', '10-14', 'lt-80', '90-100' 등)이면 숫자 순서(순서형),
+    아니면 기존처럼 알파벳 순 코드(명목형). 알파벳 순이면 '5-9'가 '45-49' 뒤로 가는 문제를 막기 위함."""
+    import re
+
+    def num_key(cat: str):
+        m = re.search(r"-?\d+(\.\d+)?", str(cat))
+        return float(m.group()) if m else None
+
+    cols = []
+    for col in df.columns:
+        series = df[col]
+        if not hasattr(series, "cat"):
+            cols.append(series.to_numpy(dtype=float))
+            continue
+        cats = list(series.cat.categories)
+        keys = [num_key(c) for c in cats]
+        if all(k is not None for k in keys):
+            order = {c: i for i, c in enumerate(sorted(cats, key=num_key))}
+            cols.append(series.map(order).to_numpy(dtype=float))
+        else:
+            cols.append(series.cat.codes.to_numpy(dtype=float))
+    return np.column_stack(cols)
+
+
+def _bunch(X: np.ndarray, target) -> SimpleNamespace:
+    target_names = sorted(set(map(str, target)))
+    idx = {n: i for i, n in enumerate(target_names)}
+    return SimpleNamespace(data=X, target=np.array([idx[str(t)] for t in target], dtype=int), target_names=target_names)
+
+
+def _load_openml_categorical(data_id: int) -> SimpleNamespace:
+    """결측 행을 제거하고 범주형을 정수 인코딩. HEaaN-ID3와 같은 크기가 된다
+    (breast-cancer 286->277행, soybean-large 683->562행/15 class)."""
+    raw = fetch_openml(data_id=data_id, as_frame=True)
+    keep = ~raw.data.isna().any(axis=1) & ~raw.target.isna()
+    return _bunch(_encode_categorical(raw.data[keep]), raw.target[keep].astype(str).tolist())
+
+
+def _load_breast_cancer_nominal():
+    """UCI Breast Cancer(Ljubljana, 9개 명목/순서형 feature, 2 class) - Wisconsin `breast_cancer`(30 수치)와 다른 데이터."""
+    return _load_openml_categorical(13)
+
+
+def _load_soybean15():
+    """UCI Soybean(large) 결측 행 제거 -> 562행, 35 범주형 feature, 15 class (HEaaN-ID3의 Soybean과 같은 크기)."""
+    return _load_openml_categorical(42)
+
+
+def _load_banknote():
+    raw = fetch_openml(data_id=1462, as_frame=False)
+    return _bunch(raw.data.astype(float), list(raw.target))
+
+
+def _load_sepsis():
+    """UCI Sepsis survival(id 827) primary + validation cohort = 110,341행, 3 feature, 2 class (HBDT와 같은 크기).
+    생존 92.6%로 불균형이 크다 - 다수 클래스 기준선과 함께 볼 것."""
+    import io
+    import urllib.request
+    import zipfile
+
+    cache = _cache_dir() / "sepsis_primary_validation.csv"
+    if not cache.exists():
+        import pandas as pd
+        url = "https://archive.ics.uci.edu/static/public/827/sepsis+survival+minimal+clinical+records.zip"
+        outer = zipfile.ZipFile(io.BytesIO(urllib.request.urlopen(url, timeout=120).read()))
+        inner = zipfile.ZipFile(io.BytesIO(outer.read(outer.namelist()[0])))
+        parts = [pd.read_csv(io.BytesIO(inner.read(n))) for n in inner.namelist()
+                 if n.endswith("primary_cohort.csv") or n.endswith("validation_cohort.csv")]
+        pd.concat(parts, ignore_index=True).to_csv(cache, index=False)
+    d = np.loadtxt(cache, delimiter=",", skiprows=1)
+    return _bunch(d[:, :3], d[:, 3].astype(int).tolist())
+
+
+def _load_cover10k():
+    """Akavia et al. 공식 저장소(intuit/Decision-Trees-over-FHE)의 covertype 10,000행 부분집합(54 feature, 7 class)."""
+    import urllib.request
+
+    cache = _cache_dir() / "akavia_cover_train_small.csv"
+    if not cache.exists():
+        url = "https://raw.githubusercontent.com/intuit/Decision-Trees-over-FHE/master/data/cover_train_small.csv"
+        cache.write_bytes(urllib.request.urlopen(url, timeout=120).read())
+    d = np.loadtxt(cache, delimiter=",", skiprows=1)
+    return _bunch(d[:, 1:], d[:, 0].astype(int).tolist())
+
+
 _DATASET_LOADERS = {
     "iris": load_iris,
     "wine": load_wine,
@@ -59,7 +153,32 @@ _DATASET_LOADERS = {
     "digits": load_digits,
     "diabetes": _load_pima_diabetes,
     "soybean": _load_soybean,
+    # 2026-10-08 논문 비교용(PAPER_ROADMAP.md 2장)
+    "breast_cancer_nominal": _load_breast_cancer_nominal,
+    "soybean15": _load_soybean15,
+    "banknote": _load_banknote,
+    "sepsis": _load_sepsis,
+    "cover10k": _load_cover10k,
 }
+
+# 평가 규약(2026-10-08 결정): 작은 데이터셋은 층화 3-fold CV(Akavia와 같음), 큰 데이터셋은 고정 분할 1번(train 2/3).
+HOLDOUT_DATASETS = {"sepsis", "cover10k"}
+CV_FOLDS = 3
+CV_SEED = 42
+
+
+def evaluation_splits(dataset_name: str) -> list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+    """논문 실험용 raw 분할 목록 [(X_train, X_test, y_train, y_test), ...]. 스케일링은 하지 않는다(fold마다
+    train으로 fit_scaler 후 scale_features). CV면 CV_FOLDS개, holdout이면 1개."""
+    from sklearn.model_selection import StratifiedKFold
+
+    data = _DATASET_LOADERS[dataset_name]()
+    X, y = np.asarray(data.data, dtype=float), np.asarray(data.target)
+    if dataset_name in HOLDOUT_DATASETS:
+        X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=1 / 3, random_state=CV_SEED, stratify=y)
+        return [(X_tr, X_te, y_tr, y_te)]
+    skf = StratifiedKFold(n_splits=CV_FOLDS, shuffle=True, random_state=CV_SEED)
+    return [(X[tr], X[te], y[tr], y[te]) for tr, te in skf.split(X, y)]
 
 
 @dataclass
