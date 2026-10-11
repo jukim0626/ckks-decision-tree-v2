@@ -329,16 +329,18 @@ def update(ctx, lay: Layout, opt: OptConfig, params: list, grads: list, velocity
     new_params, new_vel = [], []
     for q in range(len(params)):
         g = grads[q]
+        # 허수부가 iteration을 넘어 쌓이지 않게 한다(he_ops.real_part 참고). Re(x) = (x + conj(x))/2의 1/2은 이미 있는
+        # 곱셈(β, lr)에 합쳐서 level을 더 쓰지 않는다: v = β·Re(v_old) + g, p -= lr·Re(v), p = Re(clamp(p)).
+        conj2 = lambda ct: eng.add(eng.intt(ct), eng.conjugate(eng.intt(ct), ctx.conjugation_key))   # 2·Re(ct)
         if opt.optimizer == "mom":
-            v = g if velocity is None else eng.add(H.mul(ctx, velocity[q], opt.beta), g)
+            v = g if velocity is None else eng.add(H.mul(ctx, conj2(velocity[q]), opt.beta * 0.5), g)
             v = H.lv(ctx, v)
             new_vel.append(v)
             step = v
         else:
             step = g
-        p = eng.subtract(H.lv(ctx, params[q]), H.mul(ctx, step, lr_vec[q]))
-        if opt.clamp:
-            p = H.he_clamp(ctx, p, bound[q], inv_r[q])
+        p = eng.subtract(H.lv(ctx, params[q]), H.mul(ctx, conj2(H.lv(ctx, step)), lr_vec[q] * 0.5))
+        p = H.he_clamp(ctx, p, bound[q], inv_r[q], real=True) if opt.clamp else H.real_part(ctx, p)
         new_params.append(H.lv(ctx, p))
     return new_params, (new_vel if opt.optimizer == "mom" else None)
 

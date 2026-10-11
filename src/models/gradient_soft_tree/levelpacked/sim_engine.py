@@ -58,6 +58,10 @@ class SimEngine:
         deg = len(coeffs) - 1
         return SimCt(np.polynomial.polynomial.polyval(ct.v, coeffs), ct.level - ceil(log2(deg + 1)))
 
+    def conjugate(self, ct, key=None):
+        """시뮬레이터 값은 실수라 켤레가 자기 자신."""
+        return SimCt(ct.v.copy(), ct.level)
+
     def intt(self, ct):
         return ct
 

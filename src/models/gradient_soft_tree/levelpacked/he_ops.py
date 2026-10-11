@@ -116,6 +116,15 @@ def he_sign(ctx, z, inv_radius, k: int = SIGN_K):
     return y
 
 
+def real_part(ctx, ct, scale: float = 1.0):
+    """scale * Re(ct) = scale * (ct + conj(ct)) / 2. CKKS 슬롯은 복소수라 연산 노이즈의 허수부가 남는데, 일반 bootstrap은
+    허수부를 그대로 유지하고 다항식(sigmoid/exp/sign 합성)은 허수부를 키운다. 학습 내내 저장되는 파라미터/velocity에
+    허수부가 쌓이면 어느 순간 다항식이 발산한다(2026-10-10 wine fold0 it143 재현: 파라미터 허수부 0.21 -> 1.73 후 폭주,
+    같은 상태를 재암호화하면 정상). conjugate는 level을 쓰지 않는다."""
+    c = ctx.engine.intt(ct)
+    return mul(ctx, ctx.engine.add(c, ctx.engine.conjugate(c, ctx.conjugation_key)), 0.5 * scale)
+
+
 def he_sign_many(ctx, zs: list, inv_radius, k: int = SIGN_K) -> list:
     """서로 독립인 여러 입력의 sign을 나란히 계산 - 반복마다 레벨 확보를 같이 해서 bootstrap을 2개씩 merge."""
     ys = [mul(ctx, z, inv_radius) for z in zs]
@@ -125,7 +134,7 @@ def he_sign_many(ctx, zs: list, inv_radius, k: int = SIGN_K) -> list:
     return ys
 
 
-def he_clamp(ctx, x, bound, inv_radius, k: int = SIGN_K):
+def he_clamp(ctx, x, bound, inv_radius, k: int = SIGN_K, real: bool = False):
     """clamp(x, -bound, bound) = (|x+B| - |x-B|)/2, |z| = z*sign(z). bound/inv_radius는 슬롯별 평문 벡터 가능
     (threshold와 alpha/leaf가 같은 ciphertext에 섞여 있어도 한 번에 처리).
     2026-10-09: 예전엔 min(x,B) 다음 max(.,-B)를 순서대로 해서 sign 두 번이 직렬이었다. 이 식은 두 sign이
@@ -135,6 +144,8 @@ def he_clamp(ctx, x, bound, inv_radius, k: int = SIGN_K):
     zp, zm = eng.add(x, bound), eng.subtract(x, bound)
     sp, sm = he_sign_many(ctx, [zp, zm], inv_radius, k)
     ap, am = mul(ctx, zp, sp), mul(ctx, zm, sm)
+    if real:  # 허수부 제거를 마지막 0.5 곱셈에 합친다(level 추가 소모 없음)
+        return lv(ctx, real_part(ctx, eng.subtract(ap, am), 0.5))
     return lv(ctx, mul(ctx, eng.subtract(ap, am), 0.5))
 
 
