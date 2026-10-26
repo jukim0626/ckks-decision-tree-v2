@@ -346,8 +346,10 @@ def update(ctx, lay: Layout, opt: OptConfig, params: list, grads: list, velocity
 
 
 # ---------------------------------------------------------------- 평문 에뮬레이션(검증용)
-def emulate(X: np.ndarray, Y: np.ndarray, depth: int, spec: ApproxSpec, opt: OptConfig, iterations: int, params0: dict):
-    """같은 규칙(reference.compute_gradients poly + GD/momentum + clamp_plain)으로 평문 학습. iteration별 params 반환."""
+def emulate(X: np.ndarray, Y: np.ndarray, depth: int, spec: ApproxSpec, opt: OptConfig, iterations: int, params0: dict,
+            true_fn: bool = False):
+    """같은 규칙(reference.compute_gradients poly + GD/momentum + clamp_plain)으로 평문 학습. iteration별 params 반환.
+    true_fn=True면 sigmoid/softmax만 진짜 함수로 바꾼다(나머지 규칙 동일) - 다항식 근사 손실 측정용(2026-10-20)."""
     from models.gradient_soft_tree.baseline.reference import PolySpec, compute_gradients
     ps = PolySpec(spec.sigmoid_coeffs, 2.0, spec.exp_coeffs, spec.exp_interval, spec.recip_iterations, spec.steepness)
     params = {k: v.copy() for k, v in params0.items()}
@@ -357,7 +359,8 @@ def emulate(X: np.ndarray, Y: np.ndarray, depth: int, spec: ApproxSpec, opt: Opt
               "alpha": (opt.softmax_bound, 1 / opt.softmax_radius), "leaf_logits": (opt.softmax_bound, 1 / opt.softmax_radius)}
     hist = []
     for it in range(iterations):
-        grads, _ = compute_gradients(X, Y, params, depth, spec.steepness, ps, balance_lambda=opt.balance)
+        grads, _ = compute_gradients(X, Y, params, depth, spec.steepness, "true" if true_fn else ps,
+                                     balance_lambda=opt.balance)
         for k in params:
             if opt.optimizer == "mom":
                 vel[k] = grads[k] if it == 0 else opt.beta * vel[k] + grads[k]
