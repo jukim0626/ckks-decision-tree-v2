@@ -43,7 +43,7 @@ class OptConfig:
     softmax_radius: float = 14.0
     leaf_k_scale: bool = False   # leaf lr = lr * n_classes (leaf 분포가 K개로 퍼져 gradient가 ~1/K로 작아지는 것 보정, 10-08)
     balance: float = 0.0         # 나눗셈 없는 balance penalty λ (10-09, reference.compute_gradients의 balance_lambda와 같은 식)
-    class_weight: str = ""       # "" | inv | sqrt: 클래스 빈도 역수(또는 그 제곱근) 가중 MSE(reference loss="wmse"), 불균형 데이터용(10-27)
+    class_weight: str = ""       # "" | inv | sqrt | capN: 클래스 빈도 역수(제곱근 / 평균 1 기준 상한 N) 가중 MSE(reference loss="wmse"), 불균형 데이터용(10-27)
 
     def node_lr(self, n_features: int) -> float:
         return self.lr * max(1.0, self.kappa * n_features)
@@ -60,10 +60,14 @@ def class_sample_weights(y: np.ndarray, n_classes: int, kind: str) -> np.ndarray
     cw = np.where(prior > 0, 1 / np.maximum(prior, 1e-12), 0.0)
     if kind == "sqrt":
         cw = np.sqrt(cw)
-    elif kind != "inv":
+    elif kind != "inv" and not kind.startswith("cap"):
         raise ValueError(f"unknown class_weight {kind!r}")
     w = cw[y]
-    return w / w.mean()
+    w = w / w.mean()
+    if kind.startswith("cap"):  # 역수 가중을 평균 1로 맞춘 뒤 상한 N으로 자르고 다시 평균 1로(극소수 클래스 과보정 방지)
+        w = np.minimum(w, float(kind[3:]))
+        w = w / w.mean()
+    return w
 
 
 def default_spec() -> ApproxSpec:

@@ -118,6 +118,7 @@ def main() -> None:
     check_weighted("breast_cancer_nominal", 3, "inv", n_models=2, balance=1.0)   # multi-start + balance
     check_weighted("wine", 2, "inv", n_models=4)
     check_weighted("wine", 3, "inv", block=64, groups=2)     # H=3, G=2 타일
+    check_weighted("soybean", 3, "cap5", balance=1.0)
     print("\n모든 levelpacked 시뮬레이션 검증 통과.")
 
 

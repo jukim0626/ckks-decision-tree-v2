@@ -255,10 +255,24 @@ def split_dataset_subset(
     return X_train, X_test, y_train, y_test, class_names
 
 
-def fit_scaler(X_train_raw: np.ndarray, feature_range: tuple[float, float] = (-1.0, 1.0)) -> MinMaxScaler:
+def fit_scaler(X_train_raw: np.ndarray, feature_range: tuple[float, float] = (-1.0, 1.0),
+               scaling: str = "minmax") -> MinMaxScaler:
+    """scaling (2026-10-27):
+    - minmax     : [min, max] -> feature_range (기존)
+    - clip5_95   : [5%, 95% 분위수] -> feature_range, 밖은 scale_features의 clip으로 경계값(winsorize). 두 분위수가 같은
+                   feature는 sklearn 규칙대로 폭 1로 취급(값이 거의 이진화됨 - 범주형 feature에선 이득, digits 픽셀에선 손해)
+    - clip5_95fb : clip5_95와 같되 두 분위수가 같은 feature만 [min, max] 사용
+    분위수 방식도 feature별 선형 변환이라 MinMaxScaler에 (lo, hi) 두 행을 fit해서 만든다 -> save/load_scaler, scale_features 그대로."""
     scaler = MinMaxScaler(feature_range=feature_range)
-    scaler.fit(X_train_raw)
-    return scaler
+    if scaling == "minmax":
+        return scaler.fit(X_train_raw)
+    if scaling not in ("clip5_95", "clip5_95fb"):
+        raise ValueError(f"unknown scaling {scaling!r}")
+    lo, hi = np.percentile(X_train_raw, 5, axis=0), np.percentile(X_train_raw, 95, axis=0)
+    if scaling == "clip5_95fb":
+        deg = hi <= lo
+        lo, hi = np.where(deg, X_train_raw.min(0), lo), np.where(deg, X_train_raw.max(0), hi)
+    return scaler.fit(np.vstack([lo, hi]))
 
 
 def scale_features(scaler: MinMaxScaler, X_raw: np.ndarray) -> np.ndarray:

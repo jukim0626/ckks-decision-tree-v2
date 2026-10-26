@@ -71,12 +71,12 @@ def _init_all(F: int, K: int, depth: int, seed: int, n_models: int):
 
 # ------------------------------------------------------------------ setup [client]
 def setup(session_dir: Path, dataset: str, depth: int, seed: int, level_preset: int, split: str, opt_json: str,
-          n_models: int = 1, bootstrap_key: str = "small") -> None:
+          n_models: int = 1, bootstrap_key: str = "small", scaling: str = "minmax") -> None:
     """split: "fold:<k>"(evaluation_splits의 k번째) 또는 test_size 숫자(예전 방식)."""
     fold = int(split.split(":")[1]) if split.startswith("fold:") else None
     test_size = None if fold is not None else float(split)
     X_tr_raw, X_te_raw, y_tr, y_te = _split({"dataset": dataset, "test_size": test_size, "fold": fold})
-    scaler = fit_scaler(X_tr_raw)
+    scaler = fit_scaler(X_tr_raw, scaling=scaling)  # client 전처리 - finalize/predict는 저장된 scaler를 그대로 씀
     X = scale_features(scaler, X_tr_raw)
     K = int(max(y_tr.max(), y_te.max()) + 1)
     lay = Layout(len(y_tr), X.shape[1], K, depth, 32768, n_models=n_models)
@@ -116,7 +116,7 @@ def setup(session_dir: Path, dataset: str, depth: int, seed: int, level_preset: 
     cfg = {"setup_times": times, "n_train": int(len(y_tr)), "n_test": int(len(y_te)),
            "n_data_ct": lay.G * lay.H + lay.H, "n_param_ct": lay.n_params,
            "n_internal": (1 << depth) - 1, "n_leaves": 1 << depth, "layout_desc": lay.describe(), "dataset": dataset, "depth": depth, "seed": seed, "level_preset": level_preset, "test_size": test_size, "fold": fold,
-           "layout": lay.to_dict(), "opt": json.loads(opt_json), "bootstrap_key": bootstrap_key, "n_store": lay.n_store, "iterations_done": 0,
+           "layout": lay.to_dict(), "opt": json.loads(opt_json), "bootstrap_key": bootstrap_key, "scaling": scaling, "n_store": lay.n_store, "iterations_done": 0,
            "dataset": dataset}
     (session_dir / "config.json").write_text(json.dumps(cfg))
 
@@ -261,7 +261,8 @@ def main() -> None:
     cmd, session_dir = sys.argv[1], Path(sys.argv[2])
     if cmd == "setup":
         setup(session_dir, sys.argv[3], int(sys.argv[4]), int(sys.argv[5]), int(sys.argv[6]), sys.argv[7], sys.argv[8],
-              int(sys.argv[9]) if len(sys.argv) > 9 else 1, sys.argv[10] if len(sys.argv) > 10 else "small")
+              int(sys.argv[9]) if len(sys.argv) > 9 else 1, sys.argv[10] if len(sys.argv) > 10 else "small",
+              sys.argv[11] if len(sys.argv) > 11 else "minmax")
     elif cmd == "iter":
         iterate(session_dir)
     elif cmd == "finalize":
