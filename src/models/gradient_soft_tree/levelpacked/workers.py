@@ -97,11 +97,15 @@ def setup(session_dir: Path, dataset: str, depth: int, seed: int, level_preset: 
     data_dir = session_dir / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
     Y = one_hot_encode(y_tr, K)
+    w = T.class_sample_weights(y_tr, K, json.loads(opt_json).get("class_weight", ""))
+    Wn = None if w is None else np.repeat((w * (2.0 / lay.n_samples))[:, None], K, axis=1)
     t = time.time()
     for h in range(lay.H):  # (feature 그룹 g, 샘플 그룹 h) 타일마다 ciphertext 하나 - client가 평문으로 배치 후 암호화
         for g in range(lay.G):
             eng.write_ciphertext(eng.encrypt(lay.pack_X(X, g, h).tolist(), ctx.pk), data_dir / f"X_{g}_{h}.ct")
         eng.write_ciphertext(eng.encrypt(lay.pack_Y(Y, h).tolist(), ctx.pk), data_dir / f"Y_{h}.ct")
+        if w is not None:  # 가중 MSE: w(s)*2/n를 Y와 같은 배치로(라벨 의존이라 암호화)
+            eng.write_ciphertext(eng.encrypt(lay.pack_Y(Wn, h).tolist(), ctx.pk), data_dir / f"W_{h}.ct")
     times["encrypt_train_data_s"] = time.time() - t  # 패킹 + 암호화 + 저장(학습 데이터 X, Y)
     params0 = _init_all(X.shape[1], K, depth, seed, n_models)
     t = time.time()
@@ -133,6 +137,7 @@ def iterate(session_dir: Path) -> None:
     ctx = load_server_context(counter, session_dir / "keys", mode="gpu", device_id=0)
     X = [[engine.read_ciphertext(session_dir / "data" / f"X_{g}_{h}.ct") for h in range(lay.H)] for g in range(lay.G)]
     Y = [engine.read_ciphertext(session_dir / "data" / f"Y_{h}.ct") for h in range(lay.H)]
+    W = [engine.read_ciphertext(session_dir / "data" / f"W_{h}.ct") for h in range(lay.H)] if opt.class_weight else None
     params = _read_list(engine, session_dir / "params", "p", lay.n_params)
     vel_dir = session_dir / "velocity"
     velocity = _read_list(engine, vel_dir, "vel", lay.n_params) if vel_dir.exists() else None
@@ -140,7 +145,7 @@ def iterate(session_dir: Path) -> None:
     t0 = time.time()
     with GpuPeakWatcher() as gpu:
         store = T.materialize(ctx, lay, params)
-        grads = T.gradients(ctx, lay, T.default_spec(), X, Y, store, balance=opt.balance)
+        grads = T.gradients(ctx, lay, T.default_spec(), X, Y, store, balance=opt.balance, W=W)
         t_grad = time.time() - t0
         n_boot_grad = _n_boot(counter)
         params, velocity = T.update(ctx, lay, opt, params, grads, velocity)

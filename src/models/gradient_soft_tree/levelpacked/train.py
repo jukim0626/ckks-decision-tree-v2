@@ -112,14 +112,14 @@ def _evaluate(session_dir: Path, tag: str, it: int, measures: list, t_start: flo
 
 def train(dataset: str, depth: int, iterations: int, preset: str, lr: float | None, seed: int, level_preset: int,
           fold: int | None = None, results: Path | None = None, checkpoints: list[int] | None = None,
-          n_models: int = 1, balance: float = 0.0, bootstrap_key: str = "small") -> Path:
+          n_models: int = 1, balance: float = 0.0, bootstrap_key: str = "small", class_weight: str = "") -> Path:
     """checkpoints: 이 iteration들에서도 finalize + encrypted inference를 해서 결과를 기록(학습은 계속).
     한 번 돌려서 여러 iteration 예산의 결과를 얻기 위함 - 마지막 iteration은 항상 포함."""
     checkpoints = sorted(set((checkpoints or []) + [iterations]))
     opt = PRESETS[preset](lr)
-    if balance:
+    if balance or class_weight:
         from dataclasses import replace as _replace
-        opt = _replace(opt, balance=balance)
+        opt = _replace(opt, balance=balance, class_weight=class_weight)
     fold_tag = f"f{fold}" if fold is not None else "s80"
     session_dir = make_session_dir(f"levelpacked_{dataset}_d{depth}_{preset}_{fold_tag}_")
     tag = f"[levelpacked {dataset} d={depth} {preset}]"
@@ -161,6 +161,8 @@ def main() -> None:
     ap.add_argument("--checkpoints", type=str, default="", help="중간 평가 iteration, 예: 50,100")
     ap.add_argument("--models", type=str, default="1", help="multi-start 모델 수 R(2의 거듭제곱) 또는 auto(연산량 안 늘리는 최대 R)")
     ap.add_argument("--balance", type=float, default=0.0, help="balance penalty λ")
+    ap.add_argument("--class-weight", choices=["", "inv", "sqrt"], default="",
+                    help="가중 MSE: inv(클래스 빈도 역수) / sqrt(그 제곱근), 가중치는 client가 암호화해서 넘김")
     ap.add_argument("--bootstrap-key", choices=["small", "regular"], default="small",
                     help="small: 작은 key(~0.26GiB, 느림) / regular: 일반 key(~9.9GiB GPU 메모리, ~3배 빠름)")
     a = ap.parse_args()
@@ -172,7 +174,7 @@ def main() -> None:
         n_models = free_models(len(ytr), Xtr.shape[1], int(max(ytr.max(), yte.max()) + 1), a.depth)
     else:
         n_models = int(a.models)
-    train(a.dataset, a.depth, a.iterations, a.preset, a.lr, a.seed, a.level_preset, a.fold, a.results, cps, n_models, a.balance, a.bootstrap_key)
+    train(a.dataset, a.depth, a.iterations, a.preset, a.lr, a.seed, a.level_preset, a.fold, a.results, cps, n_models, a.balance, a.bootstrap_key, a.class_weight)
 
 
 if __name__ == "__main__":

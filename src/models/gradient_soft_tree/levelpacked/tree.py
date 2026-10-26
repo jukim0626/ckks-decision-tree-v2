@@ -43,12 +43,27 @@ class OptConfig:
     softmax_radius: float = 14.0
     leaf_k_scale: bool = False   # leaf lr = lr * n_classes (leaf 분포가 K개로 퍼져 gradient가 ~1/K로 작아지는 것 보정, 10-08)
     balance: float = 0.0         # 나눗셈 없는 balance penalty λ (10-09, reference.compute_gradients의 balance_lambda와 같은 식)
+    class_weight: str = ""       # "" | inv | sqrt: 클래스 빈도 역수(또는 그 제곱근) 가중 MSE(reference loss="wmse"), 불균형 데이터용(10-27)
 
     def node_lr(self, n_features: int) -> float:
         return self.lr * max(1.0, self.kappa * n_features)
 
     def leaf_lr(self, n_classes: int) -> float:
         return self.lr * (n_classes if self.leaf_k_scale else 1.0)
+
+
+def class_sample_weights(y: np.ndarray, n_classes: int, kind: str) -> np.ndarray | None:
+    """샘플별 가중치(학습 샘플 평균 1). kind="" 이면 None(가중 없음). 라벨에 의존하므로 client가 계산해서 암호화해 넘긴다."""
+    if not kind:
+        return None
+    prior = np.bincount(y, minlength=n_classes) / len(y)
+    cw = np.where(prior > 0, 1 / np.maximum(prior, 1e-12), 0.0)
+    if kind == "sqrt":
+        cw = np.sqrt(cw)
+    elif kind != "inv":
+        raise ValueError(f"unknown class_weight {kind!r}")
+    w = cw[y]
+    return w / w.mean()
 
 
 def default_spec() -> ApproxSpec:
@@ -164,16 +179,18 @@ def predict_scores(ctx, lay: Layout, spec: ApproxSpec, X, store) -> list:
 
 
 # ---------------------------------------------------------------- forward + backward
-def gradients(ctx, lay: Layout, spec: ApproxSpec, X, Y, store, balance: float = 0.0) -> list:
+def gradients(ctx, lay: Layout, spec: ApproxSpec, X, Y, store, balance: float = 0.0, W: list | None = None) -> list:
     """store와 같은 모양의 gradient ciphertext 리스트. X[g][h], Y[h].
+    W[h]가 있으면 가중 MSE: client가 암호화한 w(s) * 2/n (Y[h]와 같은 배치, 유효 영역 밖 0)을 평문 마스크 대신 곱한다
+    (ct x 평문 -> ct x ct, 레벨 소모는 같다). 가중치는 라벨에 의존하므로 평문으로 주면 서버가 라벨을 알게 된다.
     balance > 0이면 나눗셈 없는 balance penalty λ Σ_i 2^-l β_i², β_i = Σ_s P^i(s)(g_i(s) - 1/2)/n 의 gradient를
     dL/dgate_i(s)에 2λ 2^-l β_i P^i(s)/n로 더한다(P^i 경로는 stop-gradient - reference와 같은 근사)."""
     eng = ctx.engine
     G_, H_ = range(lay.G), range(lay.H)
     leaf_probs, cache = _forward(ctx, lay, spec, X, store, keep=True)
     yhat, leaf_cache = _leaf_scores(ctx, lay, spec, store, leaf_probs, keep=True)
-    # dL/dy_hat (MSE, 전체 샘플 수로 나눔)
-    E = [H.mul(ctx, eng.subtract(yhat[h], Y[h]), lay.y_mask(h) * (2.0 / lay.n_samples)) for h in H_]
+    # dL/dy_hat (MSE, 전체 샘플 수로 나눔. 가중이면 w(s)*2/n가 이미 W[h]에 들어 있다)
+    E = [H.mul(ctx, eng.subtract(yhat[h], Y[h]), lay.y_mask(h) * (2.0 / lay.n_samples) if W is None else W[h]) for h in H_]
 
     parts = {}
     # ---- leaf backward ----
@@ -357,10 +374,11 @@ def emulate(X: np.ndarray, Y: np.ndarray, depth: int, spec: ApproxSpec, opt: Opt
     lrs = {"threshold": opt.node_lr(X.shape[1]), "alpha": opt.node_lr(X.shape[1]), "leaf_logits": opt.leaf_lr(Y.shape[1])}
     bounds = {"threshold": (opt.threshold_bound, 1 / opt.threshold_radius),
               "alpha": (opt.softmax_bound, 1 / opt.softmax_radius), "leaf_logits": (opt.softmax_bound, 1 / opt.softmax_radius)}
+    w = class_sample_weights(Y.argmax(1), Y.shape[1], opt.class_weight)
     hist = []
     for it in range(iterations):
         grads, _ = compute_gradients(X, Y, params, depth, spec.steepness, "true" if true_fn else ps,
-                                     balance_lambda=opt.balance)
+                                     balance_lambda=opt.balance, loss="mse" if w is None else "wmse", sample_weight=w)
         for k in params:
             if opt.optimizer == "mom":
                 vel[k] = grads[k] if it == 0 else opt.beta * vel[k] + grads[k]

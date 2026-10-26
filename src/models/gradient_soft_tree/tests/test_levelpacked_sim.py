@@ -63,6 +63,45 @@ def check(dataset: str, depth: int, seed: int = 0, block: int = 0, groups: int =
     assert status == "PASS"
 
 
+def check_weighted(dataset: str, depth: int, kind: str, n_models: int = 1, balance: float = 0.0,
+                   block: int = 0, groups: int = 0, seed: int = 0) -> None:
+    """가중 MSE(class_weight, 2026-10-27): client가 암호화한 W[h] = w*2/n 경로가 reference(loss="wmse")와
+    같은 gradient를 내는지. multi-start(R개 모델, 모델마다 다른 파라미터)와 balance penalty를 같이 켠 경우도 본다."""
+    X, _, y, yte, _ = load_scaled_dataset_subset(dataset)
+    K = int(max(y.max(), yte.max()) + 1)
+    Y = one_hot_encode(y, K)
+    lay = Layout(len(y), X.shape[1], K, depth, 32768, block, groups, n_models=n_models)
+    lay.validate()
+    lay = lay.with_store()
+    rng = np.random.default_rng(seed)
+    ni = (1 << depth) - 1
+    plist = [{"alpha": rng.normal(0, 0.8, (ni, X.shape[1])), "threshold": rng.uniform(-0.9, 0.9, (ni, X.shape[1])),
+              "leaf_logits": rng.normal(0, 1.0, (1 << depth, K))} for _ in range(n_models)]
+    w = T.class_sample_weights(y, K, kind)
+    Wn = np.repeat((w * (2.0 / lay.n_samples))[:, None], K, axis=1)
+
+    ctx = SimContext(SimEngine())
+    eng = ctx.engine
+    store = [eng.encrypt(v) for v in lay.pack_store(plist if n_models > 1 else plist[0])]
+    Xc, Yc = _enc_data(eng, lay, X, Y)
+    Wc = [eng.encrypt(lay.pack_Y(Wn, h)) for h in range(lay.H)]
+    grads = T.gradients(ctx, lay, T.default_spec(), Xc, Yc, store, balance=balance, W=Wc)
+    got = lay.unpack_store([eng.decrypt(g) for g in grads])
+    got = got if n_models > 1 else [got]
+    err = 0.0
+    for r in range(n_models):
+        ref, _ = compute_gradients(X, Y, plist[r], depth, approx=DEFAULT_POLY_SPEC, balance_lambda=balance,
+                                   loss="wmse", sample_weight=w)
+        err = max(err, max(np.abs(got[r][k] - ref[k]).max() for k in ref))
+    # 가중이 실제로 효과가 있는지(가중 없는 gradient와 달라야 함)
+    ref_mse, _ = compute_gradients(X, Y, plist[0], depth, approx=DEFAULT_POLY_SPEC, balance_lambda=balance)
+    diff = max(np.abs(got[0][k] - ref_mse[k]).max() for k in ref_mse)
+    status = "PASS" if err < TOL and diff > 1e-6 else "FAIL"
+    print(f"[{status}] {dataset:14s} depth={depth} wmse({kind}) R={n_models} λ={balance} {lay.describe()} "
+          f"grad max err={err:.2e} (vs 가중 없음 {diff:.2e}, w max {w.max():.2f})")
+    assert status == "PASS"
+
+
 def main() -> None:
     for ds in ["iris", "wine", "breast_cancer", "soybean"]:
         for depth in [1, 2, 3]:
@@ -72,6 +111,13 @@ def main() -> None:
     check("wine", 3, block=64, groups=2)    # H=3, G=2 (둘 다)
     check("wine", 2, block=32, groups=3)    # H=5, G=3
     check("digits", 2)
+    # 가중 MSE(2026-10-27)
+    check_weighted("breast_cancer", 3, "inv")
+    check_weighted("soybean", 3, "inv")
+    check_weighted("soybean", 2, "sqrt", balance=1.0)
+    check_weighted("breast_cancer_nominal", 3, "inv", n_models=2, balance=1.0)   # multi-start + balance
+    check_weighted("wine", 2, "inv", n_models=4)
+    check_weighted("wine", 3, "inv", block=64, groups=2)     # H=3, G=2 타일
     print("\n모든 levelpacked 시뮬레이션 검증 통과.")
 
 
